@@ -1,0 +1,7 @@
+/build/
+/.cache/
+/data/
+*.log
+.DS_Store
+/evidence/*.ppm
+/evidence/*.evd

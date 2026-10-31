@@ -1,0 +1,18 @@
+App = use "../src/inventory".
+List = use "std/list".
+Option = use "std/option".
+check why yes = if yes then print "PASS {why}" else error why.
+main =
+  _ = check "canonical tags" (App.tagsOf "USB, cables ,usb" == ["usb","cables"]);
+  _ = check "member names" (App.wordy "user123" and not (App.wordy "Bad Name"));
+  item = {id=1,name="FP-RISC board",loc="Office",sub="Shelf",desc="test",tags=["electronics"],created=100,at=100,by="test",moves=Nil};
+  first = App.apply App.initModel (App.itemLine item "test" 100);
+  _ = check "journal creates item" (List.length first.items == 1 and first.nextId == 2);
+  moved = App.apply first (App.itemLine {item | loc="Workshop"} "test" 200);
+  found = case App.findItem moved.items 1 of Option.Some x -> x | _ -> error "item missing";
+  _ = check "moves retain creation and prior location" (found.created == 100 and List.length found.moves == 1);
+  gone = App.apply moved (App.delLine 1 "test" 300);
+  _ = check "delete replay" (List.length gone.items == 0);
+  bad = App.apply gone "not JSON";
+  _ = check "bad journal line counted" (bad.skipped == 1);
+  print "inventory checks passed".

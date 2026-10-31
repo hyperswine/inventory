@@ -1,0 +1,33 @@
+P = use "sol/lib/proc".
+J = use "sol/lib/json".
+need r = case r of Ok x -> x | Err why -> error "{why}".
+check why yes = if yes then Unit else error why.
+command argv = need (P.output (Proc.runNow (P.withTimeout 900000 (P.spec argv)))).
+observe argv = need (Proc.runNow (P.withTimeout 900000 (P.spec argv))).
+live argv =
+  code = need (Proc.inheritNow (P.spec argv));
+  _ = check "process exited {code}" (code == 0);
+  code.
+readBytes path =
+  r = need (Stream.openRead path 65536);
+  (result,r2) = Stream.foldChunks (fn acc b -> b :: acc) [] r;
+  _ = need (Stream.closeRead r2);
+  Bytes.concat (List.rev (need result)).
+writeBytes path bytes =
+  scratch = tempDir "project-write";
+  w = need (Stream.openWrite "{scratch}/bytes" 16777216);
+  (result,w2) = Stream.writeChunk bytes w;
+  _ = need (Stream.closeWrite w2);
+  _ = need result;
+  _ = need (Fs.copyPublishNow "{scratch}/bytes" path 65536 True);
+  Unit.
+writeText path text = writeBytes path (need (Utf8.encode text)).
+report path value = writeText path "{J.pretty value}\n".
+setup u =
+  _ = command ["/bin/mkdir","-p","build",".cache","data","evidence"];
+  root = need (IO.cwd Unit);
+  _ = need (Env.set "XDG_CACHE_HOME" "{root}/.cache");
+  Unit.
+package name = Str.trim (command ["brew","--prefix",name]).
+fprHome u = "{package "fprisc"}/libexec/fprisc".
+qosHome u = "{package "qos-portable"}/libexec/qos-portable".

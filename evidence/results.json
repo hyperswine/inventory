@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "runner": "Sol",
+  "checks": [
+    "native application behavior",
+    "real loopback HTTP 200",
+    "application title",
+    "owned server cleanup"
+  ],
+  "compiler": "fpr 0.12.0"
+}
