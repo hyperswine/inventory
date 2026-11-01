@@ -28,6 +28,3 @@ setup u =
   root = need (IO.cwd Unit);
   _ = need (Env.set "XDG_CACHE_HOME" "{root}/.cache");
   Unit.
-package name = Str.trim (command ["brew","--prefix",name]).
-fprHome u = "{package "fprisc"}/libexec/fprisc".
-qosHome u = "{package "qos-portable"}/libexec/qos-portable".

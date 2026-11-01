@@ -1,7 +1,9 @@
 #!/usr/bin/env sol
+
 C = use "../scripts/common".
 W = use "../scripts/webtest".
 J = use "sol/lib/json".
+
 runChecks u =
   _ = C.setup Unit;
   _ = C.command ["fpr","build","tests/check.fpr","-o","build/check"];
@@ -17,7 +19,10 @@ runChecks u =
   _ = C.check "application HTTP page failed" (W.status page == 200 and Str.contains "Home inventory" (W.body page));
   _ = C.need (Proc.cancel job);
   _ = C.writeText "evidence/native-checks.log" output;
-  C.report "evidence/results.json" (J.JObj [("passed",J.JBool True),("runner",J.JStr "Sol"),
-    ("checks",J.JArr [J.JStr "native application behavior",J.JStr "real loopback HTTP 200",J.JStr "application title",J.JStr "owned server cleanup"]),
-    ("compiler",J.JStr (Str.trim (C.command ["fpr","--version"]))) ]).
+  C.report
+    "evidence/results.json"
+    (J.JObj [("passed",J.JBool True),("runner",J.JStr "Sol"),
+      ("checks",J.JArr [J.JStr "native application behavior",J.JStr "real loopback HTTP 200",J.JStr "application title",J.JStr "owned server cleanup"]),
+      ("compiler",J.JStr (Str.trim (C.command ["fpr","--version"]))) ]).
+
 > runChecks Unit.
