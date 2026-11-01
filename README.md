@@ -27,6 +27,20 @@ Native tests cover canonical tags/member names, journal create/move/delete seman
 
 Builds can take several minutes for the larger applications. Build/test commands have explicit deadlines and return a failure when a child process fails. Generated binaries, caches, data, keys and raw logs are excluded from Git.
 
+## The live deployment
+
+The household's copy runs on the Mac mini as the launchd agent `cloud.cswine.inventory`, listening only on its Tailscale address (port 6720). nginx on the Linode terminates TLS for `inv.cswine.cloud` and proxies to it ([deploy/macmini/inv.cswine.cloud.nginx](deploy/macmini/inv.cswine.cloud.nginx) is a copy of that site). From the repository root:
+
+```sh
+sol deploy/macmini/deploy.sol deploy        # build, copy, back up the log, restart, probe both URLs
+sol deploy/macmini/deploy.sol status        # running?, last lines, both URLs
+sol deploy/macmini/deploy.sol rollback      # put the previous binary back
+sol deploy/macmini/deploy.sol member NAME   # add a member or set a password (asked on the Mac mini, not echoed)
+sol deploy/macmini/deploy.sol pull-data     # copy the live log to data/inventory.log
+```
+
+On the Mac mini, `~/inventory/inventory.log` is the inventory: one JSON line per change, never rewritten. Every deploy copies it to `~/inventory/backups/` first (newest 30 kept) and keeps the replaced binary as `inventory.prev`. The log holds password and device-token hashes, never a password or token, but it is private data: `data/` is ignored by Git.
+
 ## Build tools
 
 All project orchestration and test scripts are **Sol**. There are no Makefiles, Python or Node scripts.
