@@ -116,7 +116,7 @@ Item = { id : Int, name : String, loc : String, sub : String, desc : String, tag
 initModel = { items = Nil, nextId = 1, members = Nil, devices = Nil, pend = Nil, events = 0, skipped = 0,
               fails = Nil, sess = Nil, booted = 0, path = "", prof = noProf }.
 noDraft = { name = "", loc = "", sub = "", desc = "", tags = "" }.
-noSess = { sid = 0, user = "", toast = "", role = "", tn = 0, editing = 0 - 1, q = "", sort = Recent, page = 0, pane = Items, con = Nil,
+noSess = { sid = 0, clientReady = False, user = "", toast = "", role = "", tn = 0, editing = 0 - 1, q = "", sort = Recent, page = 0, pane = Items, con = Nil,
            tried = "", theme = 1, d = noDraft }.
 
 # the tags offered while editing, before the household has its own
@@ -369,7 +369,7 @@ mirror m sid c =
   q = clip 100 (S.trim c.q);
   # a new search or a new order starts at the first page
   page = (case strEq q s0.q and c.sort == s0.sort of True -> s0.page | False -> 0);
-  s = { s0 | q = q, sort = c.sort, page = page, pane = c.pane,
+  s = { s0 | clientReady = True, q = q, sort = c.sort, page = page, pane = c.pane,
              d = { name = c.name, loc = c.loc, sub = c.sub, desc = c.desc, tags = c.tags } };
   resume m sid s c.tok.
 resume m sid s tok | strlen s.user > 0 or strlen tok == 0 or strEq tok s.tried = (sPut m s, Nil).
@@ -395,7 +395,7 @@ withUser sid msg m s = case msg of
 
 signOut m sid s =
   m2 = (case strlen s.tried > 0 of True -> commit m (undeviceLine (Digest.sha256 s.tried) (Clock.now Unit)) | False -> m);
-  (forget m2 sid, setLocals sid [G.assign @Client.tok "", G.assign @Client.pane Items] :: Nil).
+  (sPut m2 { noSess | sid = sid, clientReady = True }, setLocals sid [G.assign @Client.tok "", G.assign @Client.pane Items] :: Nil).
 
 # ---- items ---------------------------------------------------------------------------------
 
@@ -663,7 +663,7 @@ ranked xs = List.sortBy (Order.reverse Order.int) (fn kc -> (case kc of (k, c) -
               (List.map (fn g -> (case g of (k, vs) -> (k, List.length vs))) (List.groupBy (fn x -> x) (List.sortBy Order.string (fn x -> x) xs))).
 firsts kcs = List.map (fn kc -> (case kc of (k, c) -> k)) kcs.
 
-noView = { signed = 0, user = "", toast = "", role = "", theme = 1, editing = 0 - 1, items = Nil, total = 0, shown = 0,
+noView = { clientReady = False, signed = 0, user = "", toast = "", role = "", theme = 1, editing = 0 - 1, items = Nil, total = 0, shown = 0,
            page = 0, pages = 1, first = 0, q = "", places = Nil, tags = Nil, quick = Nil, members = Nil, devices = 0, online = 0,
            events = 0, booted = 0, con = Nil, nplaces = 0, ntags = 0, ndevices = 0, skipped = 0, pageSize = 0, keep = 0,
            prof = noProf, mem = Nil, grows = (0, 0), harts = 0 }.
@@ -674,7 +674,7 @@ noView = { signed = 0, user = "", toast = "", role = "", theme = 1, editing = 0 
 project size keep sid m =
   s = sGet m.sess sid;
   case strEq s.user "" of
-    True -> { noView | toast = s.toast, role = s.role, theme = s.theme }
+    True -> { noView | clientReady = s.clientReady, toast = s.toast, role = s.role, theme = s.theme }
   | False ->
       hits = sorted s.sort (List.filter (matches (lower s.q)) m.items);
       n = List.length hits;
@@ -682,7 +682,7 @@ project size keep sid m =
       onAdmin = s.pane == Admin;
       places = firsts (ranked (List.map (fn it -> it.loc) m.items));
       tags = firsts (ranked (List.concatMap (fn it -> it.tags) m.items));
-      { signed = 1, user = s.user, toast = s.toast, role = s.role, theme = s.theme, editing = s.editing,
+      { clientReady = True, signed = 1, user = s.user, toast = s.toast, role = s.role, theme = s.theme, editing = s.editing,
         items = List.take size (List.drop page.first hits), total = List.length m.items, shown = n,
         page = page.index, pages = page.pages, first = page.first, q = s.q,
         places = List.take 8 places, tags = List.take 12 tags,
@@ -725,7 +725,7 @@ root v kids =
 noRender = { st = noStat, hits = 0, misses = 0, kept = 0 }.
 view keep sid v old = case old of (cardsOld, rs) ->
   (case v.signed == 0 of
-    True -> (G.renderStyled (root v [loginView v]), old)
+    True -> (G.renderStyled (root v (case v.clientReady of True -> [loginView v] | False -> Nil)), old)
   | False ->
       t0 = Sys.timeUs Unit;
       (case VC.many (fn it -> "{it.id}") itemCard v.items (VC.begin "inventory-card-v1" verify cardsOld) of (cards, cc) ->

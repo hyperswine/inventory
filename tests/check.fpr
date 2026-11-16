@@ -1,10 +1,23 @@
 App = use "../src/inventory".
+Digest = use "std/digest".
 List = use "std/list".
 Option = use "std/option".
 check why yes = if yes then print "PASS {why}" else error why.
 main =
   _ = check "canonical tags" (App.tagsOf "USB, cables ,usb" == ["usb","cables"]);
   _ = check "member names" (App.wordy "user123" and not (App.wordy "Bad Name"));
+  initial = App.project 10 10 1 App.initModel;
+  _ = check "new visit waits for client state" (not initial.clientReady and initial.signed == 0);
+  (guest, _) = App.mirror App.initModel 1 App.client;
+  guestView = App.project 10 10 1 guest;
+  _ = check "guest sees login after sync" (guestView.clientReady and guestView.signed == 0);
+  known = { App.initModel | devices = [(Digest.sha256 "fixture", "member")] };
+  (restored, _) = App.mirror known 1 { App.client | tok = "fixture" };
+  restoredView = App.project 10 10 1 restored;
+  _ = check "remembered visit opens inventory on first sync" (restoredView.signed == 1 and restoredView.user == "member");
+  (expired, _) = App.mirror App.initModel 1 { App.client | tok = "expired" };
+  expiredView = App.project 10 10 1 expired;
+  _ = check "unrecognized device gets login" (expiredView.clientReady and expiredView.signed == 0);
   item = {id=1,name="FP-RISC board",loc="Office",sub="Shelf",desc="test",tags=["electronics"],created=100,at=100,by="test",moves=Nil};
   first = App.apply App.initModel (App.itemLine item "test" 100);
   _ = check "journal creates item" (List.length first.items == 1 and first.nextId == 2);
