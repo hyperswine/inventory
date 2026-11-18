@@ -2,6 +2,7 @@ App = use "../src/inventory".
 Digest = use "std/digest".
 List = use "std/list".
 Option = use "std/option".
+Json = use "std/json".
 check why yes = if yes then print "PASS {why}" else error why.
 main =
   _ = check "canonical tags" (App.tagsOf "USB, cables ,usb" == ["usb","cables"]);
@@ -37,4 +38,15 @@ main =
   fresh = App.notHere moved.items [{item | name="fp-risc BOARD", loc="workshop"}, {item | name="FP-RISC board"}, {item | name="Other"}];
   _ = check "import skips names already in the same place" (List.map (fn it -> it.name) fresh == ["FP-RISC board","Other"]);
   _ = check "suggestions keep the first spelling" (App.uniqueCi ["Office","office","","Lab","OFFICE","lab"] == ["Office","Lab"]);
+  kinds = [("item", App.itemLine item "test" 100, App.Put item),
+           ("rename", App.renameLine {item | loc="Lab"} "test" 100, App.Rename {item | loc="Lab"}),
+           ("del", App.delLine 1 "test" 300, App.Del 1 "test" 300),
+           ("member", App.memberLine "ana" "s4lt" "h4sh" 400, App.Member "ana" "s4lt" "h4sh"),
+           ("device", App.deviceLine "ana" "d3v" 500, App.Device "ana" "d3v"),
+           ("undevice", App.undeviceLine "d3v" 600, App.Undevice "d3v"),
+           ("revoke", App.revokeLine "ana" 700, App.Revoke "ana"),
+           ("unknown op", Json.render (Json.object [("op", Json.Text "later"), ("at", Json.Integer 1)]), App.OtherOp),
+           ("not JSON", "not JSON", App.Unreadable),
+           ("blank", "   ", App.Blank)];
+  _ = List.map (fn k -> (case k of (why, line, op) -> check "{why} line round-trips through parseLine" (App.parseLine line == op))) kinds;
   print "inventory checks passed".
