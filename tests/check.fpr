@@ -28,4 +28,13 @@ main =
   _ = check "delete replay" (List.length gone.items == 0);
   bad = App.apply gone "not JSON";
   _ = check "bad journal line counted" (bad.skipped == 1);
+  journal = [App.itemLine item "test" 100, App.itemLine {item | loc="Workshop"} "test" 200,
+             App.itemLine {item | id=2, name="Scope"} "test" 210, App.renameLine {item | loc="Lab"} "test" 220,
+             App.delLine 1 "test" 300, App.itemLine item "test" 400, "not JSON", App.delLine 9 "test" 500];
+  booted = App.replayed App.initModel journal;
+  applied = List.fold (fn mm l -> App.apply mm l) App.initModel journal;
+  _ = check "boot replay matches the live apply" (booted.items == applied.items and booted.nextId == applied.nextId and booted.skipped == 1 and booted.events == 8);
+  fresh = App.notHere moved.items [{item | name="fp-risc BOARD", loc="workshop"}, {item | name="FP-RISC board"}, {item | name="Other"}];
+  _ = check "import skips names already in the same place" (List.map (fn it -> it.name) fresh == ["FP-RISC board","Other"]);
+  _ = check "suggestions keep the first spelling" (App.uniqueCi ["Office","office","","Lab","OFFICE","lab"] == ["Office","Lab"]);
   print "inventory checks passed".

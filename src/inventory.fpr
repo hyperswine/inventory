@@ -79,6 +79,7 @@ Program = use "std/program".
 Option = use "std/option".
 Order = use "std/order".
 Digest = use "std/digest".
+MutMap = use "std/mutmap".
 
 Txt = G.Txt.
 Dyn = G.Dyn.
@@ -172,13 +173,9 @@ apply m line = case Json.parse line of
     Err why -> { m | skipped = m.skipped + 1 }
   | Ok v -> applyOp m (txt "op" v) v.
 
-applyOp m op v | strEq op "item" =
-  at = int "at" v;
-  made = int "created" v;
-  # a place renamed (the console's `rename`) is the same place: not a move
-  putItem (strEq (txt "why" v) "rename") m { id = int "id" v, name = txt "name" v, loc = txt "loc" v, sub = txt "sub" v, desc = txt "desc" v,
-              tags = strs "tags" v, created = (case made == 0 of True -> at | False -> made), at = at, by = txt "by" v, moves = Nil }.
-applyOp m op v | strEq op "del" = { m | items = List.filter (fn it -> it.id != int "id" v) m.items }.
+# a place renamed (the console's `rename`) is the same place: not a move
+applyOp m op v | strEq op "item" = putItem (isRename v) m (itemOf v).
+applyOp m op v | strEq op "del" = { m | items = dropById m.items (int "id" v) }.
 applyOp m op v | strEq op "member" =
   { m | members = (txt "name" v, txt "salt" v, txt "hash" v) :: List.filter (fn mm -> not (strEq (memName mm) (txt "name" v))) m.members }.
 applyOp m op v | strEq op "device" = { m | devices = (txt "hash" v, txt "name" v) :: m.devices }.
@@ -186,12 +183,30 @@ applyOp m op v | strEq op "undevice" = { m | devices = List.filter (fn d -> not 
 applyOp m op v | strEq op "revoke" = { m | devices = List.filter (fn d -> not (strEq (devName d) (txt "name" v))) m.devices }.
 applyOp m op v = m.
 
+# An "item" line, read; and what it makes of the item already under its id
+# (the first creation date stays, a move is remembered).  The live `apply` and
+# the boot replay below both go through these two.
+itemOf v =
+  at = int "at" v;
+  made = int "created" v;
+  { id = int "id" v, name = txt "name" v, loc = txt "loc" v, sub = txt "sub" v, desc = txt "desc" v,
+    tags = strs "tags" v, created = (case made == 0 of True -> at | False -> made), at = at, by = txt "by" v, moves = Nil }.
+isRename v = strEq (txt "why" v) "rename".
+merged renamed old it = { it | created = old.created, moves = (case renamed of True -> old.moves | False -> movedFrom old it) }.
+
 findItem items id = List.find (fn x -> x.id == id) items.
 putItem renamed m it = case findItem m.items it.id of
     Option.None -> { m | items = it :: m.items, nextId = imax m.nextId (it.id + 1) }
-  | Option.Some old ->
-      new = { it | created = old.created, moves = (case renamed of True -> old.moves | False -> movedFrom old it) };
-      { m | items = List.map (fn x -> (case x.id == it.id of True -> new | False -> x)) m.items, nextId = imax m.nextId (it.id + 1) }.
+  | Option.Some old -> { m | items = replaceById m.items it.id (merged renamed old it), nextId = imax m.nextId (it.id + 1) }.
+# Ids are unique in the list, so both stop at the one item and share the rest.
+replaceById : (xs : List Item | measure xs) -> Int -> Item -> List Item .
+replaceById xs id new = case xs of
+    Nil -> Nil
+  | x :: r -> (case x.id == id of True -> new :: r | False -> x :: replaceById r id new).
+dropById : (xs : List Item | measure xs) -> Int -> List Item .
+dropById xs id = case xs of
+    Nil -> Nil
+  | x :: r -> (case x.id == id of True -> r | False -> x :: dropById r id).
 movedFrom old it | strEq (place old) (place it) = old.moves.
 movedFrom old it = List.take 3 ({ at = it.at, from = place old } :: old.moves).
 
@@ -253,7 +268,39 @@ boot o path =
   _ = (case m2.skipped > 0 of True -> Sys.stderr "[inventory] {m2.skipped} unreadable lines skipped\n" | False -> Unit);
   _ = (case List.isEmpty m2.members of True -> Sys.stderr "[inventory] no members yet: add one with --member=NAME and INV_PASSWORD\n" | False -> Unit);
   { m2 | path = path, prof = { noProf | bootUs = t1 - t0, bootLines = m2.events } }.
-replayed m ls = List.fold (fn mm l -> apply { mm | events = mm.events + 1 } l) m ls.
+# Boot folds the log into a model nothing else can see yet, so while it does the
+# items live in a linear id -> item table (written in place, std/mutmap) and the
+# ids in the order the list keeps them (newest first); the list is built once at
+# the end.  Item and delete lines take the same itemOf/merged as `apply`; every
+# other line goes through applyOp.  A model that already has items folds as
+# before.
+replayed m ls = case m.items of
+    Nil -> replayOwned m ls
+  | _ -> List.fold (fn mm l -> apply { mm | events = mm.events + 1 } l) m ls.
+replayOwned m ls =
+  (m2, tbl, order) = List.fold (fn st l -> replayLine st l) (m, MutMap.ints Unit, Nil) ls;
+  (items, tbl2) = List.fold (fn acc id -> emitId acc id) (Nil, tbl) order;
+  _ = MutMap.free tbl2;
+  { m2 | items = List.reverse items }.
+# a deleted id made again sits in the order twice: its newest place wins
+emitId (acc, tbl) id = case MutMap.get id tbl of
+    (Option.Some it, t1) -> (it :: acc, MutMap.remove id t1)
+  | (Option.None, t1) -> (acc, t1).
+replayLine (mm, tbl, order) l =
+  m1 = { mm | events = mm.events + 1 };
+  case strlen (S.trim l) == 0 of
+    True -> (m1, tbl, order)
+  | False -> (case Json.parse l of
+      Err why -> ({ m1 | skipped = m1.skipped + 1 }, tbl, order)
+    | Ok v -> replayOp m1 tbl order (txt "op" v) v).
+replayOp m tbl order op v | strEq op "item" =
+  it = itemOf v;
+  m2 = { m | nextId = imax m.nextId (it.id + 1) };
+  case MutMap.get it.id tbl of
+    (Option.None, t1) -> (m2, MutMap.insert it.id it t1, it.id :: order)
+  | (Option.Some old, t1) -> (m2, MutMap.insert it.id (merged (isRename v) old it) t1, order).
+replayOp m tbl order op v | strEq op "del" = (m, MutMap.remove (int "id" v) tbl, order).
+replayOp m tbl order op v = (applyOp m op v, tbl, order).
 
 # The pending lines, oldest first, in ONE write.  A write that fails, or a
 # file that is no longer the one the journal left (a backup restored over it,
@@ -457,7 +504,17 @@ suggestJson user items =
                            :: List.map (fn l -> (lower l, Json.strings (spots l))) locs))
     , ("tags", Json.strings (List.take 100 (List.unique (List.concatMap (fn it -> it.tags) recent)))) ]).
 # the first spelling of each value, ignoring case and the empty one
-uniqueCi xs = List.reverse (List.fold (fn seen x -> (case strlen x == 0 or List.any (fn y -> strEq (lower y) (lower x)) seen of True -> seen | False -> x :: seen)) Nil xs).
+# (the lower-case spellings seen so far are a linear set, std/mutmap)
+uniqueCi xs =
+  (out, seen) = List.fold (fn st x -> uniqStep st x) (Nil, MutMap.strings Unit) xs;
+  _ = MutMap.free seen;
+  List.reverse out.
+uniqStep (acc, seen) x | strlen x == 0 = (acc, seen).
+uniqStep (acc, seen) x =
+  k = lower x;
+  case MutMap.member k seen of
+    (True, s1) -> (acc, s1)
+  | (False, s1) -> (x :: acc, MutMap.insert k Unit s1).
 
 # ---- the console: the data, live -------------------------------------------------------------------
 # A command and what it answered go on this tab's console (the newest 40
@@ -983,12 +1040,25 @@ importFirestore path store = case File.readText path of
         m = boot o store;
         docs = Option.withDefault Nil (Option.andThen Json.asList (Json.field "documents" v));
         its = List.filterMap fsItem docs;
-        fresh = List.filter (fn it -> not (List.any (fn x -> strEq (lower x.name) (lower it.name) and strEq (lower (place x)) (lower (place it))) m.items)) its;
+        fresh = notHere m.items its;
         numbered = List.indexedMap (fn i it -> { it | id = m.nextId + i }) fresh;
         _ = (case Journal.append (List.map (fn it -> itemLine it "import" it.at) numbered) o.journal of
                Ok _ -> Unit | Err why -> Program.fail 1 "inventory: {why}");
         _ = print "[inventory] imported {List.length numbered} items ({List.length its - List.length fresh} already here)";
         0).
+# the imported items whose name and place (ignoring case) no item here has: the
+# items here go into a linear set of those keys once, then each is one lookup
+notHere items its =
+  here = List.fold (fn s x -> MutMap.insert (placeKey x) Unit s) (MutMap.strings Unit) items;
+  (keep, h2) = List.fold (fn st it -> keepNew st it) (Nil, here) its;
+  _ = MutMap.free h2;
+  List.reverse keep.
+keepNew (acc, here) it = case MutMap.member (placeKey it) here of
+    (True, h1) -> (acc, h1)
+  | (False, h1) -> (it :: acc, h1).
+placeKey it =
+  n = lower it.name;
+  "{strlen n}:{n}{lower (place it)}".
 fsStr k doc = Option.withDefault "" (Option.andThen Json.asString (Json.at ["fields", k, "stringValue"] doc)).
 fsTime k doc = isoSecs (Option.withDefault "" (Option.andThen Json.asString (Json.at ["fields", k, "timestampValue"] doc))).
 fsTags doc = case Option.andThen Json.asList (Json.at ["fields", "tags", "arrayValue", "values"] doc) of
