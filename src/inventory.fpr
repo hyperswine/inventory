@@ -168,22 +168,40 @@ strs k v = case Option.andThen Json.asList (Json.field k v) of
 # ---- the interpreter: one line into the model --------------------------------------
 # the whole meaning of the log, live and at boot alike
 
-apply m line | strlen (S.trim line) == 0 = m.
-apply m line = case Json.parse line of
-    Err why -> { m | skipped = m.skipped + 1 }
-  | Ok v -> applyOp m (txt "op" v) v.
+# A line, read ONCE into what it says (parseLine); `apply`, the boot replay and
+# the item history match on that, never on the "op" string.  The disk format is
+# the JSON above, unchanged.  An "item" line with "why":"rename" is a Rename (a
+# place renamed is the same place: not a move).  A blank line is Blank, a line
+# that is not JSON is Unreadable (counted in `skipped`), and JSON with an op
+# this version does not know is OtherOp (ignored); each is what it was before.
+Op = Type (Put Item | Rename Item | Del Int String Int | Member String String String | Device String String
+         | Undevice String | Revoke String | OtherOp | Unreadable | Blank).
 
-# a place renamed (the console's `rename`) is the same place: not a move
-applyOp m op v | strEq op "item" = putItem (isRename v) m (itemOf v).
-applyOp m op v | strEq op "del" = { m | items = dropById m.items (int "id" v) }.
-applyOp m op v | strEq op "member" =
-  { m | members = (txt "name" v, txt "salt" v, txt "hash" v) :: List.filter (fn mm -> not (strEq (memName mm) (txt "name" v))) m.members }.
-applyOp m op v | strEq op "device" = { m | devices = (txt "hash" v, txt "name" v) :: m.devices }.
-applyOp m op v | strEq op "undevice" = { m | devices = List.filter (fn d -> not (strEq (devHash d) (txt "hash" v))) m.devices }.
-applyOp m op v | strEq op "revoke" = { m | devices = List.filter (fn d -> not (strEq (devName d) (txt "name" v))) m.devices }.
-applyOp m op v = m.
+parseLine line | strlen (S.trim line) == 0 = Blank.
+parseLine line = case Json.parse line of
+    Err why -> Unreadable
+  | Ok v -> opOf (txt "op" v) v.
+opOf op v | strEq op "item" = (case strEq (txt "why" v) "rename" of True -> Rename (itemOf v) | False -> Put (itemOf v)).
+opOf op v | strEq op "del" = Del (int "id" v) (txt "by" v) (int "at" v).
+opOf op v | strEq op "member" = Member (txt "name" v) (txt "salt" v) (txt "hash" v).
+opOf op v | strEq op "device" = Device (txt "name" v) (txt "hash" v).
+opOf op v | strEq op "undevice" = Undevice (txt "hash" v).
+opOf op v | strEq op "revoke" = Revoke (txt "name" v).
+opOf op v = OtherOp.
 
-# An "item" line, read; and what it makes of the item already under its id
+apply m line = applyOp m (parseLine line).
+
+applyOp m (Put it) = putItem False m it.
+applyOp m (Rename it) = putItem True m it.
+applyOp m (Del id by at) = { m | items = dropById m.items id }.
+applyOp m (Member name salt hash) = { m | members = (name, salt, hash) :: List.filter (fn mm -> not (strEq (memName mm) name)) m.members }.
+applyOp m (Device name hash) = { m | devices = (hash, name) :: m.devices }.
+applyOp m (Undevice hash) = { m | devices = List.filter (fn d -> not (strEq (devHash d) hash)) m.devices }.
+applyOp m (Revoke name) = { m | devices = List.filter (fn d -> not (strEq (devName d) name)) m.devices }.
+applyOp m Unreadable = { m | skipped = m.skipped + 1 }.
+applyOp m op = m.
+
+# An "item" line's item; and what it makes of the item already under its id
 # (the first creation date stays, a move is remembered).  The live `apply` and
 # the boot replay below both go through these two.
 itemOf v =
@@ -191,7 +209,6 @@ itemOf v =
   made = int "created" v;
   { id = int "id" v, name = txt "name" v, loc = txt "loc" v, sub = txt "sub" v, desc = txt "desc" v,
     tags = strs "tags" v, created = (case made == 0 of True -> at | False -> made), at = at, by = txt "by" v, moves = Nil }.
-isRename v = strEq (txt "why" v) "rename".
 merged renamed old it = { it | created = old.created, moves = (case renamed of True -> old.moves | False -> movedFrom old it) }.
 
 findItem items id = List.find (fn x -> x.id == id) items.
@@ -286,21 +303,16 @@ replayOwned m ls =
 emitId (acc, tbl) id = case MutMap.get id tbl of
     (Option.Some it, t1) -> (it :: acc, MutMap.remove id t1)
   | (Option.None, t1) -> (acc, t1).
-replayLine (mm, tbl, order) l =
-  m1 = { mm | events = mm.events + 1 };
-  case strlen (S.trim l) == 0 of
-    True -> (m1, tbl, order)
-  | False -> (case Json.parse l of
-      Err why -> ({ m1 | skipped = m1.skipped + 1 }, tbl, order)
-    | Ok v -> replayOp m1 tbl order (txt "op" v) v).
-replayOp m tbl order op v | strEq op "item" =
-  it = itemOf v;
+replayLine (mm, tbl, order) l = replayOp { mm | events = mm.events + 1 } tbl order (parseLine l).
+replayOp m tbl order (Put it) = replayPut m tbl order False it.
+replayOp m tbl order (Rename it) = replayPut m tbl order True it.
+replayOp m tbl order (Del id by at) = (m, MutMap.remove id tbl, order).
+replayOp m tbl order op = (applyOp m op, tbl, order).
+replayPut m tbl order renamed it =
   m2 = { m | nextId = imax m.nextId (it.id + 1) };
   case MutMap.get it.id tbl of
     (Option.None, t1) -> (m2, MutMap.insert it.id it t1, it.id :: order)
-  | (Option.Some old, t1) -> (m2, MutMap.insert it.id (merged (isRename v) old it) t1, order).
-replayOp m tbl order op v | strEq op "del" = (m, MutMap.remove (int "id" v) tbl, order).
-replayOp m tbl order op v = (applyOp m op v, tbl, order).
+  | (Option.Some old, t1) -> (m2, MutMap.insert it.id (merged renamed old it) t1, order).
 
 # The pending lines, oldest first, in ONE write.  A write that fails, or a
 # file that is no longer the one the journal left (a backup restored over it,
@@ -607,17 +619,20 @@ showText it = S.join "\n"
 historyText m id = case File.lines m.path of
     Err why -> "cannot read the log: {why}"
   | Ok ls ->
-      evs = List.filterMap (fn l -> (case Json.parse l of
-                Ok v -> (case int "id" v == id and (strEq (txt "op" v) "item" or strEq (txt "op" v) "del") of True -> Option.Some v | False -> Option.None)
-              | Err _ -> Option.None)) ls;
+      evs = List.filter (fn op -> about id op) (List.map parseLine ls);
       case evs of
         Nil -> "no item #{id} in the log"
       | _ -> S.join "\n" (List.map histLine (List.drop (imax 0 (List.length evs - 30)) evs)).
-histLine v | strEq (txt "op" v) "del" = "{Clock.stamp (int "at" v)}  {S.padRight 8 " " (txt "by" v)} deleted".
-histLine v =
-  where = (case strlen (txt "sub" v) == 0 of True -> txt "loc" v | False -> "{txt "loc" v} / {txt "sub" v}");
-  why = (case strEq (txt "why" v) "rename" of True -> " (place renamed)" | False -> "");
-  "{Clock.stamp (int "at" v)}  {S.padRight 8 " " (txt "by" v)} {txt "name" v} @ {where}  [{S.join ", " (strs "tags" v)}]{why}".
+# an item or delete line about item `id`
+about id (Put it) = it.id == id.
+about id (Rename it) = it.id == id.
+about id (Del n by at) = n == id.
+about id op = False.
+histLine (Del id by at) = "{Clock.stamp at}  {S.padRight 8 " " by} deleted".
+histLine (Put it) = itemHist it "".
+histLine (Rename it) = itemHist it " (place renamed)".
+histLine op = "".
+itemHist it why = "{Clock.stamp it.at}  {S.padRight 8 " " it.by} {it.name} @ {place it}  [{S.join ", " it.tags}]{why}".
 
 countsText kcs | List.isEmpty kcs = "none yet".
 countsText kcs = S.join "\n" (List.map (fn kc -> (case kc of (k, c) -> "{S.padLeft 5 " " "{c}"}  {k}")) kcs).
