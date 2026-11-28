@@ -150,13 +150,9 @@ devName (_, n) = n.
 
 # ---- reading a line ----------------------------------------------------------------
 
-txt k v = Json.field k v |> Option.andThen Json.asString |> Option.withDefault "".
-int k v = Json.field k v |> Option.andThen Json.asInt |> Option.withDefault 0.
-strs k v =
-  Json.field k v
-  |> Option.andThen Json.asList
-  |> Option.map (List.filterMap Json.asString)
-  |> Option.withDefault Nil.
+txt = Json.stringOr "".
+int = Json.intOr 0.
+strs = Json.stringListField.
 
 # ---- the interpreter: one line into the model --------------------------------------
 # the whole meaning of the log, live and at boot alike
@@ -1139,12 +1135,12 @@ placeKey it =
   n = S.toLower it.name;
   "{strlen n}:{n}{S.toLower (place it)}".
 
-fsStr k doc = Json.at ["fields", k, "stringValue"] doc |> Option.andThen Json.asString |> Option.withDefault "".
-fsTime k doc = Json.at ["fields", k, "timestampValue"] doc |> Option.andThen Json.asString |> Option.withDefault "" |> isoSecs.
+fsStr k doc = Json.stringAt ["fields", k, "stringValue"] doc |> Option.withDefault "".
+fsTime k doc = Json.stringAt ["fields", k, "timestampValue"] doc |> Option.withDefault "" |> isoSecs.
 fsTags doc =
   Json.at ["fields", "tags", "arrayValue", "values"] doc
   |> Option.andThen Json.asList
-  |> Option.map (List.filterMap (fn x -> Json.field "stringValue" x |> Option.andThen Json.asString))
+  |> Option.map (List.filterMap (Json.stringField "stringValue"))
   |> Option.withDefault Nil.
 
 fsItem doc =
