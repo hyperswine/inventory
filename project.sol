@@ -1,6 +1,6 @@
 #!/usr/bin/env sol
 
-C = use "scripts/common".
+C = use "sol/lib/project".
 
 build u =
   _ = C.setup Unit;

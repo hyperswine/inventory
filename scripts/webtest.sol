@@ -1,4 +1,4 @@
-C = use "common".
+C = use "sol/lib/project".
 P = use "sol/lib/proc".
 H = use "sol/lib/http".
 ready : String -> String -> (tries : Int | measure tries) -> Int .

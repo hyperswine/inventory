@@ -1,6 +1,6 @@
 #!/usr/bin/env sol
 
-C = use "../scripts/common".
+C = use "sol/lib/project".
 W = use "../scripts/webtest".
 J = use "sol/lib/json".
 

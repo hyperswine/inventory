@@ -12,7 +12,7 @@
 #
 # A deploy never edits the log: it copies it to ~/inventory/backups first
 # (newest 30 kept) and keeps the replaced binary as ~/inventory/inventory.prev.
-C = use "../../scripts/common".
+C = use "sol/lib/project".
 P = use "sol/lib/proc".
 H = use "sol/lib/http".
 
