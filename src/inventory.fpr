@@ -72,14 +72,10 @@ Decode = use "std/decode".
 Json = use "std/json".
 Program = use "std/program".
 Option = use "std/option".
+Result = use "std/result".
 Order = use "std/order".
 Digest = use "std/digest".
 MutMap = use "std/mutmap".
-
-Txt = G.Txt.
-Dyn = G.Dyn.
-Cls = G.Cls.
-Att = G.Att.
 
 # The fields the page fills when a button is pressed are the LAST ones
 # (G.sendWith): `Login` its name and password, `AddMember` theirs.
@@ -125,32 +121,42 @@ num s = numGo s 0 (strlen s) 0.
 numGo : String -> (i : Int | measure (n - i)) -> (n : Int) -> Int -> Int .
 numGo s i n acc | i >= n = acc.
 numGo s i n acc | S.isDigit (charAt s i) = numGo s (i + 1) n (acc * 10 + charAt s i - 48).
-numGo s i n acc = acc.
+numGo _ _ _ acc = acc.
+
 # a member's name: lower-case letters and digits, 1..16 of them
 wordy s = strlen s >= 1 and strlen s <= 16 and wdGo s 0 (strlen s).
 wdGo : String -> (i : Int | measure (n - i)) -> (n : Int) -> Bool .
 wdGo s i n | i >= n = True.
 wdGo s i n =
   c = charAt s i;
-  case (c >= 48 and c <= 57) or (c >= 97 and c <= 122) of True -> wdGo s (i + 1) n | False -> False.
+  ((c >= 48 and c <= 57) or (c >= 97 and c <= 122)) and wdGo s (i + 1) n.
+
 place it | strlen it.sub == 0 = it.loc.
 place it = "{it.loc} / {it.sub}".
-# "USB, cables ,usb" -> ["usb", "cables"]
-tagsOf raw = List.unique (List.filter (fn t -> strlen t > 0) (List.map (fn t -> S.left 32 (S.toLower (S.trim t))) (S.split "," raw))).
 
-memName (n, salt, hash) = n.
-memSalt (n, salt, hash) = salt.
-memHash (n, salt, hash) = hash.
-devHash (h, n) = h.
-devName (h, n) = n.
+# "USB, cables ,usb" -> ["usb", "cables"]
+tagsOf raw =
+  raw
+  |> S.split ","
+  |> List.map (fn t -> t |> S.trim |> S.toLower |> S.left 32)
+  |> List.filter (fn t -> strlen t > 0)
+  |> List.unique.
+
+memName (n, _, _) = n.
+memSalt (_, salt, _) = salt.
+memHash (_, _, hash) = hash.
+devHash (h, _) = h.
+devName (_, n) = n.
 
 # ---- reading a line ----------------------------------------------------------------
 
-txt k v = Option.withDefault "" (Option.andThen Json.asString (Json.field k v)).
-int k v = Option.withDefault 0 (Option.andThen Json.asInt (Json.field k v)).
-strs k v = case Option.andThen Json.asList (Json.field k v) of
-    Option.Some xs -> List.filterMap Json.asString xs
-  | Option.None -> Nil.
+txt k v = Json.field k v |> Option.andThen Json.asString |> Option.withDefault "".
+int k v = Json.field k v |> Option.andThen Json.asInt |> Option.withDefault 0.
+strs k v =
+  Json.field k v
+  |> Option.andThen Json.asList
+  |> Option.map (List.filterMap Json.asString)
+  |> Option.withDefault Nil.
 
 # ---- the interpreter: one line into the model --------------------------------------
 # the whole meaning of the log, live and at boot alike
@@ -166,27 +172,30 @@ Op = Type (Put Item | Rename Item | Del Int String Int | Member String String St
 
 parseLine line | strlen (S.trim line) == 0 = Blank.
 parseLine line = case Json.parse line of
-    Err why -> Unreadable
+    Err _ -> Unreadable
   | Ok v -> opOf (txt "op" v) v.
-opOf op v | (op == "item") = (case ((txt "why" v) == "rename") of True -> Rename (itemOf v) | False -> Put (itemOf v)).
-opOf op v | (op == "del") = Del (int "id" v) (txt "by" v) (int "at" v).
-opOf op v | (op == "member") = Member (txt "name" v) (txt "salt" v) (txt "hash" v).
-opOf op v | (op == "device") = Device (txt "name" v) (txt "hash" v).
-opOf op v | (op == "undevice") = Undevice (txt "hash" v).
-opOf op v | (op == "revoke") = Revoke (txt "name" v).
-opOf op v = OtherOp.
+
+opOf "item" v | txt "why" v == "rename" = Rename (itemOf v).
+opOf "item" v     = Put (itemOf v).
+opOf "del" v      = Del (int "id" v) (txt "by" v) (int "at" v).
+opOf "member" v   = Member (txt "name" v) (txt "salt" v) (txt "hash" v).
+opOf "device" v   = Device (txt "name" v) (txt "hash" v).
+opOf "undevice" v = Undevice (txt "hash" v).
+opOf "revoke" v   = Revoke (txt "name" v).
+opOf _ _          = OtherOp.
 
 apply m line = applyOp m (parseLine line).
 
 applyOp m (Put it) = putItem False m it.
 applyOp m (Rename it) = putItem True m it.
-applyOp m (Del id by at) = { m | items = dropById m.items id }.
-applyOp m (Member name salt hash) = { m | members = (name, salt, hash) :: List.filter (fn mm -> not (((memName mm) == name))) m.members }.
+applyOp m (Del id _ _) = { m | items = dropById m.items id }.
+applyOp m (Member name salt hash) =
+  { m | members = (name, salt, hash) :: List.filter (fn mm -> memName mm != name) m.members }.
 applyOp m (Device name hash) = { m | devices = (hash, name) :: m.devices }.
-applyOp m (Undevice hash) = { m | devices = List.filter (fn d -> not (((devHash d) == hash))) m.devices }.
-applyOp m (Revoke name) = { m | devices = List.filter (fn d -> not (((devName d) == name))) m.devices }.
+applyOp m (Undevice hash) = { m | devices = List.filter (fn d -> devHash d != hash) m.devices }.
+applyOp m (Revoke name) = { m | devices = List.filter (fn d -> devName d != name) m.devices }.
 applyOp m Unreadable = { m | skipped = m.skipped + 1 }.
-applyOp m op = m.
+applyOp m _ = m.
 
 # An "item" line's item; and what it makes of the item already under its id
 # (the first creation date stays, a move is remembered).  The live `apply` and
@@ -195,37 +204,44 @@ itemOf v =
   at = int "at" v;
   made = int "created" v;
   { id = int "id" v, name = txt "name" v, loc = txt "loc" v, sub = txt "sub" v, desc = txt "desc" v,
-    tags = strs "tags" v, created = (case made == 0 of True -> at | False -> made), at = at, by = txt "by" v, moves = Nil }.
-merged renamed old it = { it | created = old.created, moves = (case renamed of True -> old.moves | False -> movedFrom old it) }.
+    tags = strs "tags" v, created = if made == 0 then at else made, at = at, by = txt "by" v, moves = Nil }.
+
+merged renamed old it =
+  { it | created = old.created, moves = if renamed then old.moves else movedFrom old it }.
 
 findItem items id = List.find (fn x -> x.id == id) items.
-putItem renamed m it = case findItem m.items it.id of
-    Option.None -> { m | items = it :: m.items, nextId = Int.max m.nextId (it.id + 1) }
-  | Option.Some old -> { m | items = replaceById m.items it.id (merged renamed old it), nextId = Int.max m.nextId (it.id + 1) }.
+
+putItem renamed m it =
+  next = Int.max m.nextId (it.id + 1);
+  case findItem m.items it.id of
+      Option.None -> { m | items = it :: m.items, nextId = next }
+    | Option.Some old -> { m | items = replaceById m.items it.id (merged renamed old it), nextId = next }.
+
 # Ids are unique in the list, so both stop at the one item and share the rest.
 replaceById : (xs : List Item | measure xs) -> Int -> Item -> List Item .
 replaceById xs id new = case xs of
     Nil -> Nil
-  | x :: r -> (case x.id == id of True -> new :: r | False -> x :: replaceById r id new).
+  | x :: r -> if x.id == id then new :: r else x :: replaceById r id new.
+
 dropById : (xs : List Item | measure xs) -> Int -> List Item .
 dropById xs id = case xs of
     Nil -> Nil
-  | x :: r -> (case x.id == id of True -> r | False -> x :: dropById r id).
-movedFrom old it | ((place old) == (place it)) = old.moves.
+  | x :: r -> if x.id == id then r else x :: dropById r id.
+
+movedFrom old it | place old == place it = old.moves.
 movedFrom old it = List.take 3 ({ at = it.at, from = place old } :: old.moves).
 
 # a validated change: applied now, queued for the disk
 commit m line = apply { m | pend = line :: m.pend, events = m.events + 1 } line.
 
-itemLine it by at = Json.render (Json.object
-  [("op", Json.Text "item"), ("id", Json.Integer it.id), ("name", Json.Text it.name), ("loc", Json.Text it.loc),
-   ("sub", Json.Text it.sub), ("desc", Json.Text it.desc), ("tags", Json.strings it.tags), ("by", Json.Text by),
-   ("at", Json.Integer at), ("created", Json.Integer it.created)]).
+itemFields it by at =
+  [("id", Json.Integer it.id), ("name", Json.Text it.name), ("loc", Json.Text it.loc),
+   ("sub", Json.Text it.sub), ("desc", Json.Text it.desc), ("tags", Json.strings it.tags),
+   ("by", Json.Text by), ("at", Json.Integer at), ("created", Json.Integer it.created)].
+
+itemLine it by at = Json.render (Json.object (("op", Json.Text "item") :: itemFields it by at)).
 # the same, marked as a rename of the place it is in
-renameLine it by at = Json.render (Json.object
-  [("op", Json.Text "item"), ("why", Json.Text "rename"), ("id", Json.Integer it.id), ("name", Json.Text it.name), ("loc", Json.Text it.loc),
-   ("sub", Json.Text it.sub), ("desc", Json.Text it.desc), ("tags", Json.strings it.tags), ("by", Json.Text by),
-   ("at", Json.Integer at), ("created", Json.Integer it.created)]).
+renameLine it by at = Json.render (Json.object (("op", Json.Text "item") :: ("why", Json.Text "rename") :: itemFields it by at)).
 delLine id by at = Json.render (Json.object [("op", Json.Text "del"), ("id", Json.Integer id), ("by", Json.Text by), ("at", Json.Integer at)]).
 memberLine name salt hash at = Json.render (Json.object
   [("op", Json.Text "member"), ("name", Json.Text name), ("salt", Json.Text salt), ("hash", Json.Text hash), ("at", Json.Integer at)]).
@@ -235,24 +251,25 @@ revokeLine name at = Json.render (Json.object [("op", Json.Text "revoke"), ("nam
 
 # ---- secrets -------------------------------------------------------------------------------
 # 32 bytes of the kernel's randomness, as 64 hex digits
-randomHex u = case File.open "/dev/urandom" "r" of
+randomHex _ = case File.open "/dev/urandom" "r" of
     Err why -> error "inventory: no randomness: {why}"
-  | Ok st -> (case Stream.read 32 st of
+  | Ok st -> case Stream.read 32 st of
       Ok bytes -> _ = Stream.close st; Digest.sha256 bytes
-    | Err why -> _ = Stream.close st; error "inventory: no randomness: {why}").
+    | Err why -> _ = Stream.close st; error "inventory: no randomness: {why}".
+
 # a password is stored as sha256 iterated over salt and password: slow enough to
 # make a stolen log a chore, quick enough for a sign-in
 pwHash salt pw = stretch 200 (Digest.sha256 "{salt}:{pw}") salt.
 stretch : (n : Int | measure n) -> String -> String -> String .
 stretch n h salt | n <= 0 = h.
 stretch n h salt = stretch (n - 1) (Digest.sha256 "{salt}{h}") salt.
-checkPw members name pw = case List.find (fn mm -> ((memName mm) == name)) members of
-    Option.Some mm -> ((pwHash (memSalt mm) pw) == (memHash mm))
+
+checkPw members name pw = case List.find (fn mm -> memName mm == name) members of
+    Option.Some mm -> pwHash (memSalt mm) pw == memHash mm
   | Option.None -> _ = pwHash "x" pw; False.   # the same work for a name that does not exist
-hasMember m name = List.any (fn mm -> ((memName mm) == name)) m.members.
-deviceUser devices h = case List.find (fn d -> ((devHash d) == h)) devices of
-    Option.Some d -> Option.Some (devName d)
-  | Option.None -> Option.None.
+
+hasMember m name = List.any (fn mm -> memName mm == name) m.members.
+deviceUser devices h = devices |> List.find (fn d -> devHash d == h) |> Option.map devName.
 
 # ---- the disk ----------------------------------------------------------------------------
 
@@ -262,16 +279,18 @@ deviceUser devices h = case List.find (fn d -> ((devHash d) == h)) devices of
 openLog path = case Journal.open path of
     Ok o -> o
   | Err why -> Program.fail 1 "inventory: {why}".
+
 boot o path =
   m0 = { initModel | booted = Clock.now Unit };
   t0 = Sys.timeUs Unit;
-  _ = (case o.cut > 0 of True -> Sys.stderr "[inventory] cut a torn last line ({o.cut} bytes) off {path}\n" | False -> Unit);
+  _ = if o.cut > 0 then Sys.stderr "[inventory] cut a torn last line ({o.cut} bytes) off {path}\n" else Unit;
   m2 = replayed m0 o.lines;
   t1 = Sys.timeUs Unit;
   _ = print "[inventory] log {path}: {m2.events} lines in {t1 - t0} us, {List.length m2.items} items, {List.length m2.members} members, {List.length m2.devices} devices";
-  _ = (case m2.skipped > 0 of True -> Sys.stderr "[inventory] {m2.skipped} unreadable lines skipped\n" | False -> Unit);
-  _ = (case List.isEmpty m2.members of True -> Sys.stderr "[inventory] no members yet: add one with --member=NAME and INV_PASSWORD\n" | False -> Unit);
+  _ = if m2.skipped > 0 then Sys.stderr "[inventory] {m2.skipped} unreadable lines skipped\n" else Unit;
+  _ = if List.isEmpty m2.members then Sys.stderr "[inventory] no members yet: add one with --member=NAME and INV_PASSWORD\n" else Unit;
   { m2 | path = path, prof = { noProf | bootUs = t1 - t0, bootLines = m2.events } }.
+
 # Boot folds the log into a model nothing else can see yet, so while it does the
 # items live in a linear id -> item table (written in place, std/mutmap) and the
 # ids in the order the list keeps them (newest first); the list is built once at
@@ -281,25 +300,29 @@ boot o path =
 replayed m ls = case m.items of
     Nil -> replayOwned m ls
   | _ -> List.fold (fn mm l -> apply { mm | events = mm.events + 1 } l) m ls.
+
 replayOwned m ls =
-  (m2, tbl, order) = List.fold (fn st l -> replayLine st l) (m, MutMap.ints Unit, Nil) ls;
-  (items, tbl2) = List.fold (fn acc id -> emitId acc id) (Nil, tbl) order;
+  (m2, tbl, order) = List.fold replayLine (m, MutMap.ints Unit, Nil) ls;
+  (items, tbl2) = List.fold emitId (Nil, tbl) order;
   _ = MutMap.free tbl2;
   { m2 | items = List.reverse items }.
+
 # a deleted id made again sits in the order twice: its newest place wins
 emitId (acc, tbl) id = case MutMap.get id tbl of
     (Option.Some it, t1) -> (it :: acc, MutMap.remove id t1)
   | (Option.None, t1) -> (acc, t1).
+
 replayLine (mm, tbl, order) l = replayOp { mm | events = mm.events + 1 } tbl order (parseLine l).
 replayOp m tbl order (Put it) = replayPut m tbl order False it.
 replayOp m tbl order (Rename it) = replayPut m tbl order True it.
-replayOp m tbl order (Del id by at) = (m, MutMap.remove id tbl, order).
+replayOp m tbl order (Del id _ _) = (m, MutMap.remove id tbl, order).
 replayOp m tbl order op = (applyOp m op, tbl, order).
+
 replayPut m tbl order renamed it =
   m2 = { m | nextId = Int.max m.nextId (it.id + 1) };
   case MutMap.get it.id tbl of
-    (Option.None, t1) -> (m2, MutMap.insert it.id it t1, it.id :: order)
-  | (Option.Some old, t1) -> (m2, MutMap.insert it.id (merged renamed old it) t1, order).
+      (Option.None, t1) -> (m2, MutMap.insert it.id it t1, it.id :: order)
+    | (Option.Some old, t1) -> (m2, MutMap.insert it.id (merged renamed old it) t1, order).
 
 # The pending lines, oldest first, in ONE write.  A write that fails, or a
 # file that is no longer the one the journal left (a backup restored over it,
@@ -308,21 +331,22 @@ replayPut m tbl order renamed it =
 # starts it again, and the model is folded from what the file holds now.
 flush j m = case m.pend of
     Nil -> m
-  | ls -> (case Journal.append (List.reverse ls) j of
+  | ls -> case Journal.append (List.reverse ls) j of
       Ok _ -> { m | pend = Nil }
-    | Err why -> error "inventory: {why}").
+    | Err why -> error "inventory: {why}".
 
 # ---- sessions ----------------------------------------------------------------------------
 
-sGet ss sid = case List.find (fn s -> s.sid == sid) ss of Option.Some s -> s | Option.None -> { noSess | sid = sid }.
+sGet ss sid = ss |> List.find (fn s -> s.sid == sid) |> Option.withDefault { noSess | sid = sid }.
 sPut m s = { m | sess = s :: sDel m.sess s.sid }.
 sDel ss sid = List.filter (fn s -> s.sid != sid) ss.
 forget m sid = { m | sess = sDel m.sess sid }.
+
 # a toast: text with a role (ok, warn); it clears itself after a while unless
 # a newer one replaced it
 toast m sid role text =
   s = sGet m.sess sid;
-  (sPut m { s | toast = text, role = role, tn = s.tn + 1 }, Live.After 4000 (Clear sid (s.tn + 1)) :: Nil).
+  (sPut m { s | toast = text, role = role, tn = s.tn + 1 }, [Live.After 4000 (Clear sid (s.tn + 1))]).
 say m sid text = toast m sid "ok" text.
 refuse m sid text = toast m sid "warn" text.
 also (m, cs) more = (m, List.append cs more).
@@ -341,25 +365,26 @@ update j ev m =
   m3 = flush j m2;
   t2 = Sys.timeUs Unit;
   prof = noteUpd (kindOf ev) (t1 - t0) m3.prof;
-  ({ m3 | prof = (case wrote of True -> { prof | flush = note prof.flush (t2 - t1) } | False -> prof) }, cs).
-step ev m = case ev of
-    Live.Msg sid msg -> pMsg sid msg m
-  | Live.Left sid -> (forget m sid, Nil)
-  | Live.Joined sid -> (m, Nil)
-  | Live.Refused sid why -> refuse m sid "refused: {why}".
+  ({ m3 | prof = if wrote then { prof | flush = note prof.flush (t2 - t1) } else prof }, cs).
 
-pMsg sid msg m = case msg of
-    Login name pw -> login m sid name pw
-  | ClientState c -> mirror m sid c
-  | Clear who n -> (case sid == 0 of True -> (clearToast m who n, Nil) | False -> (m, Nil))
-  | Dismiss -> (dismiss m (sGet m.sess sid), Nil)
-  | Theme -> (flipTheme m (sGet m.sess sid), Nil)
-  | other -> withUser sid other m (sGet m.sess sid).
+step (Live.Msg sid msg) m = pMsg sid msg m.
+step (Live.Left sid) m = (forget m sid, Nil).
+step (Live.Joined _) m = (m, Nil).
+step (Live.Refused sid why) m = refuse m sid "refused: {why}".
+
+pMsg sid (Login name pw) m = login m sid name pw.
+pMsg sid (ClientState c) m = mirror m sid c.
+pMsg 0 (Clear who n) m = (clearToast m who n, Nil).
+pMsg _ (Clear _ _) m = (m, Nil).
+pMsg sid Dismiss m = (dismiss m (sGet m.sess sid), Nil).
+pMsg sid Theme m = (flipTheme m (sGet m.sess sid), Nil).
+pMsg sid other m = withUser sid other m (sGet m.sess sid).
+
 dismiss m s = clearToast m s.sid s.tn.
 flipTheme m s = sPut m { s | theme = 1 - s.theme }.
 clearToast m sid n =
   s = sGet m.sess sid;
-  case s.tn == n of True -> sPut m { s | toast = "", role = "" } | False -> m.
+  if s.tn == n then sPut m { s | toast = "", role = "" } else m.
 
 # ---- profiling -----------------------------------------------------------------------------
 # What the app measures about itself, shown on the admin pane (microseconds):
@@ -374,74 +399,92 @@ clearToast m sid n =
 # A Stat is a count, a sum, a maximum and the last.
 noStat = { n = 0, sum = 0, max = 0, last = 0 }.
 note st us = { n = st.n + 1, sum = st.sum + us, max = Int.max st.max us, last = us }.
-avg st = case st.n == 0 of True -> 0 | False -> st.sum / st.n.
+avg st | st.n == 0 = 0.
+avg st = st.sum / st.n.
+
 noProf = { bootUs = 0, bootLines = 0, upd = Nil, flush = noStat, nev = 0 }.
 noteUpd kind us prof = { prof | upd = noteKind prof.upd kind us, nev = prof.nev + 1 }.
-noteKind es kind us = case List.any (fn e -> case e of (k, _) -> (k == kind)) es of
-    True -> List.map (fn e -> case e of (k, st) -> (case (k == kind) of True -> (k, note st us) | False -> (k, st))) es
-  | False -> List.append es ((kind, note noStat us) :: Nil).
-kindOf ev = case ev of
-    Live.Msg sid msg -> msgKind msg
-  | Live.Joined sid -> "join"
-  | Live.Left sid -> "leave"
-  | Live.Refused sid why -> "refused".
-msgKind msg = case msg of
-    Login _ _ -> "login" | Logout -> "logout" | ClientState _ -> "sync" | New -> "new" | Edit a -> "edit" | Save -> "save"
-  | Cancel -> "cancel" | Delete a -> "delete" | AddTag a -> "tag" | AddMember _ _ -> "member" | Password a -> "password"
-  | ForgetDevices -> "forget" | Theme -> "theme" | Dismiss -> "dismiss" | Clear a b -> "toast" | Page a -> "page" | Command a -> "admin".
+noteKind es kind us =
+  if List.any (fn e -> (k, _) = e; k == kind) es
+    then List.map (fn e -> (k, st) = e; if k == kind then (k, note st us) else (k, st)) es
+    else List.append es [(kind, note noStat us)].
+
+kindOf (Live.Msg _ msg) = msgKind msg.
+kindOf (Live.Joined _) = "join".
+kindOf (Live.Left _) = "leave".
+kindOf (Live.Refused _ _) = "refused".
+
+msgKind (Login _ _)     = "login".
+msgKind Logout          = "logout".
+msgKind (ClientState _) = "sync".
+msgKind New             = "new".
+msgKind (Edit _)        = "edit".
+msgKind Save            = "save".
+msgKind Cancel          = "cancel".
+msgKind (Delete _)      = "delete".
+msgKind (AddTag _)      = "tag".
+msgKind (AddMember _ _) = "member".
+msgKind (Password _)    = "password".
+msgKind ForgetDevices   = "forget".
+msgKind Theme           = "theme".
+msgKind Dismiss         = "dismiss".
+msgKind (Clear _ _)     = "toast".
+msgKind (Page _)        = "page".
+msgKind (Command _)     = "admin".
+
 statLine label st = "{S.padRight 9 " " label} n {S.padLeft 6 " " "{st.n}"}  avg {S.padLeft 7 " " "{avg st}"} us  max {S.padLeft 7 " " "{st.max}"} us  last {st.last} us".
 
 # ---- signing in ---------------------------------------------------------------------------
 # at most 8 wrong passwords in five minutes, for the whole house: a guesser
 # gains nothing by opening more tabs
 login m sid name0 pw =
-  name = S.toLower (S.trim name0);
+  name = name0 |> S.trim |> S.toLower;
   now = Clock.now Unit;
   recent = List.filter (fn t -> t > now - 300) m.fails;
-  case List.length recent >= 8 of
-    True -> refuse { m | fails = recent } sid "too many wrong passwords: try again in a few minutes"
-  | False -> (case checkPw m.members name pw of
-      False -> refuse { m | fails = now :: recent } sid "unknown name or wrong password"
-    | True ->
-        tok = randomHex Unit;
-        m2 = commit m (deviceLine name (Digest.sha256 tok) now);
-        s = sGet m2.sess sid;
-        (sPut m2 { s | user = name, tried = tok, toast = "", role = "" }, setLocals sid [G.assign @Client.pw "", G.assign @Client.tok tok] :: Nil)).
+  if List.length recent >= 8 then
+    refuse { m | fails = recent } sid "too many wrong passwords: try again in a few minutes"
+  else if not (checkPw m.members name pw) then
+    refuse { m | fails = now :: recent } sid "unknown name or wrong password"
+  else
+    tok = randomHex Unit;
+    m2 = commit m (deviceLine name (Digest.sha256 tok) now);
+    s = sGet m2.sess sid;
+    (sPut m2 { s | user = name, tried = tok, toast = "", role = "" }, [setLocals sid [G.assign @Client.pw "", G.assign @Client.tok tok]]).
 
 # The mirror: the page's Client, as the server knows it.  A page that is not
 # signed in but holds a token is signed in by it, once per token.
 mirror m sid c =
   s0 = sGet m.sess sid;
-  q = S.left 100 (S.trim c.q);
+  q = c.q |> S.trim |> S.left 100;
   # a new search or a new order starts at the first page
-  page = (case (q == s0.q) and c.sort == s0.sort of True -> s0.page | False -> 0);
+  page = if q == s0.q and c.sort == s0.sort then s0.page else 0;
   s = { s0 | clientReady = True, q = q, sort = c.sort, page = page, pane = c.pane,
              d = { name = c.name, loc = c.loc, sub = c.sub, desc = c.desc, tags = c.tags } };
   resume m sid s c.tok.
-resume m sid s tok | strlen s.user > 0 or strlen tok == 0 or (tok == s.tried) = (sPut m s, Nil).
+
+resume m sid s tok | strlen s.user > 0 or strlen tok == 0 or tok == s.tried = (sPut m s, Nil).
 resume m sid s tok = case deviceUser m.devices (Digest.sha256 tok) of
     Option.Some name -> (sPut m { s | user = name, tried = tok }, Nil)
-  | Option.None -> (sPut m { s | tried = tok }, setLocals sid [G.assign @Client.tok ""] :: Nil).
+  | Option.None -> (sPut m { s | tried = tok }, [setLocals sid [G.assign @Client.tok ""]]).
 
-withUser sid msg m s | (s.user == "") = refuse m sid "sign in first".
-withUser sid msg m s = case msg of
-    Logout -> signOut m sid s
-  | New -> (sPut m { s | editing = 0, d = noDraft }, setLocals sid (draftLocals noDraft) :: suggest sid s.user m :: Nil)
-  | Page n -> (sPut m { s | page = Int.max 0 n }, Nil)
-  | Edit id -> edit m sid s id
-  | Cancel -> (sPut m { s | editing = 0 - 1 }, setLocals sid (draftLocals noDraft) :: Nil)
-  | Save -> save m sid s
-  | Delete id -> delete m sid s id
-  | AddTag t -> addTag m sid s t
-  | AddMember name pw -> addMember m sid s (name, pw)
-  | Password pw -> password m sid s pw
-  | ForgetDevices -> forgetDevices m sid s
-  | Command cmd -> console m sid s cmd
-  | other -> refuse m sid "no such action".
+withUser sid _ m s | s.user == "" = refuse m sid "sign in first".
+withUser sid Logout m s = signOut m sid s.
+withUser sid New m s = (sPut m { s | editing = 0, d = noDraft }, [setLocals sid (draftLocals noDraft), suggest sid s.user m]).
+withUser sid (Page n) m s = (sPut m { s | page = Int.max 0 n }, Nil).
+withUser sid (Edit id) m s = edit m sid s id.
+withUser sid Cancel m s = (sPut m { s | editing = 0 - 1 }, [setLocals sid (draftLocals noDraft)]).
+withUser sid Save m s = save m sid s.
+withUser sid (Delete id) m s = delete m sid s id.
+withUser sid (AddTag t) m s = addTag m sid s t.
+withUser sid (AddMember name pw) m s = addMember m sid s (name, pw).
+withUser sid (Password pw) m s = password m sid s pw.
+withUser sid ForgetDevices m s = forgetDevices m sid s.
+withUser sid (Command cmd) m s = console m sid s cmd.
+withUser sid _ m _ = refuse m sid "no such action".
 
 signOut m sid s =
-  m2 = (case strlen s.tried > 0 of True -> commit m (undeviceLine (Digest.sha256 s.tried) (Clock.now Unit)) | False -> m);
-  (sPut m2 { noSess | sid = sid, clientReady = True }, setLocals sid [G.assign @Client.tok "", G.assign @Client.pane Items] :: Nil).
+  m2 = if strlen s.tried > 0 then commit m (undeviceLine (Digest.sha256 s.tried) (Clock.now Unit)) else m;
+  (sPut m2 { noSess | sid = sid, clientReady = True }, [setLocals sid [G.assign @Client.tok "", G.assign @Client.pane Items]]).
 
 # ---- items ---------------------------------------------------------------------------------
 
@@ -449,71 +492,76 @@ edit m sid s id = case findItem m.items id of
     Option.None -> refuse m sid "that item is gone"
   | Option.Some it ->
       d = { name = it.name, loc = it.loc, sub = it.sub, desc = it.desc, tags = S.join ", " it.tags };
-      (sPut m { s | editing = id, d = d }, setLocals sid (draftLocals d) :: suggest sid s.user m :: Nil).
+      (sPut m { s | editing = id, d = d }, [setLocals sid (draftLocals d), suggest sid s.user m]).
 
 save m sid s =
   d = s.d;
-  name = S.left 120 (S.trim d.name);
-  loc = S.left 60 (S.trim d.loc);
+  name = d.name |> S.trim |> S.left 120;
+  loc = d.loc |> S.trim |> S.left 60;
   isNew = s.editing <= 0;
   old = findItem m.items s.editing;
-  case strlen name == 0 of
-    True -> refuse m sid "give the item a name"
-  | False -> (case strlen loc == 0 of
-      True -> refuse m sid "where is it? a room or place is needed"
-    | False -> (case not isNew and old == Option.None of
-        True -> refuse (sPut m { s | editing = 0 - 1 }) sid "that item was deleted while you were editing it"
-      | False ->
-          now = Clock.now Unit;
-          id = (case isNew of True -> m.nextId | False -> s.editing);
-          it = { id = id, name = name, loc = loc, sub = S.left 60 (S.trim d.sub), desc = S.left 2000 (S.trim d.desc),
-                 tags = List.take 12 (tagsOf d.tags), created = (case old of Option.Some o -> o.created | Option.None -> now),
-                 at = now, by = s.user, moves = Nil };
-          m2 = sPut (commit m (itemLine it s.user now)) { s | editing = 0 - 1, d = noDraft };
-          also (say m2 sid (case isNew of True -> "added {name}" | False -> "saved {name}")) (setLocals sid (draftLocals noDraft) :: Nil))).
+  if strlen name == 0 then refuse m sid "give the item a name"
+  else if strlen loc == 0 then refuse m sid "where is it? a room or place is needed"
+  else if not isNew and old == Option.None then
+    refuse (sPut m { s | editing = 0 - 1 }) sid "that item was deleted while you were editing it"
+  else
+    now = Clock.now Unit;
+    id = if isNew then m.nextId else s.editing;
+    created = old |> Option.map (fn o -> o.created) |> Option.withDefault now;
+    it = { id = id, name = name, loc = loc, sub = d.sub |> S.trim |> S.left 60, desc = d.desc |> S.trim |> S.left 2000,
+           tags = d.tags |> tagsOf |> List.take 12, created = created, at = now, by = s.user, moves = Nil };
+    m2 = sPut (commit m (itemLine it s.user now)) { s | editing = 0 - 1, d = noDraft };
+    also (say m2 sid (if isNew then "added {name}" else "saved {name}")) [setLocals sid (draftLocals noDraft)].
 
 delete m sid s id = case findItem m.items id of
     Option.None -> refuse m sid "already deleted"
   | Option.Some it ->
       m2 = commit m (delLine id s.user (Clock.now Unit));
       s2 = sGet m2.sess sid;
-      m3 = sPut m2 { s2 | editing = (case s2.editing == id of True -> 0 - 1 | False -> s2.editing) };
-      also (say m3 sid "deleted {it.name}") (setLocals sid [G.assign @Client.confirm 0] :: Nil).
+      m3 = sPut m2 { s2 | editing = if s2.editing == id then 0 - 1 else s2.editing };
+      also (say m3 sid "deleted {it.name}") [setLocals sid [G.assign @Client.confirm 0]].
 
 addTag m sid s t =
   have = tagsOf s.d.tags;
-  case List.member t have of
-    True -> (m, Nil)
-  | False ->
-      tags = S.join ", " (have + [t]);
-      (sPut m { s | d = { s.d | tags = tags } }, setLocals sid [G.assign @Client.tags tags] :: Nil).
+  if List.member t have then (m, Nil)
+  else
+    tags = S.join ", " (have + [t]);
+    (sPut m { s | d = { s.d | tags = tags } }, [setLocals sid [G.assign @Client.tags tags]]).
 
 # ---- autocomplete: what the editor's script suggests from ----------------------------------------
 # Rooms, spots and tags in the order they were last used, a member's own edits
 # counted as a month more recent than they are; the page does the matching.
 #   {"loc": [...], "sub": {"*": [...], "<room, lower case>": [...]}, "tags": [...]}
 suggest sid user m = Live.Emit sid "suggest" (suggestJson user m.items).
+
 suggestJson user items =
-  recent = List.sortBy (Order.reverse Order.int) (fn it -> it.at + (case (it.by == user) of True -> 2592000 | False -> 0)) items;
-  locs = List.take 100 (uniqueCi (List.map (fn it -> it.loc) recent));
-  spots l = List.take 30 (uniqueCi (List.map (fn it -> it.sub) (List.filter (fn it -> ((S.toLower it.loc) == (S.toLower l))) recent)));
+  recent = items |> List.sortBy (Order.reverse Order.int) (fn it -> it.at + (if it.by == user then 2592000 else 0));
+  locs = recent |> List.map (fn it -> it.loc) |> uniqueCi |> List.take 100;
+  allSubs = recent |> List.map (fn it -> it.sub) |> uniqueCi |> List.take 100;
+  spots l = recent
+    |> List.filter (fn it -> S.toLower it.loc == S.toLower l)
+    |> List.map (fn it -> it.sub)
+    |> uniqueCi
+    |> List.take 30;
+  allTags = recent |> List.concatMap (fn it -> it.tags) |> List.unique |> List.take 100;
   Json.render (Json.object
     [ ("loc", Json.strings locs)
-    , ("sub", Json.object (("*", Json.strings (List.take 100 (uniqueCi (List.map (fn it -> it.sub) recent))))
-                           :: List.map (fn l -> (S.toLower l, Json.strings (spots l))) locs))
-    , ("tags", Json.strings (List.take 100 (List.unique (List.concatMap (fn it -> it.tags) recent)))) ]).
+    , ("sub", Json.object (("*", Json.strings allSubs) :: List.map (fn l -> (S.toLower l, Json.strings (spots l))) locs))
+    , ("tags", Json.strings allTags) ]).
+
 # the first spelling of each value, ignoring case and the empty one
 # (the lower-case spellings seen so far are a linear set, std/mutmap)
 uniqueCi xs =
-  (out, seen) = List.fold (fn st x -> uniqStep st x) (Nil, MutMap.strings Unit) xs;
+  (out, seen) = List.fold uniqStep (Nil, MutMap.strings Unit) xs;
   _ = MutMap.free seen;
   List.reverse out.
+
 uniqStep (acc, seen) x | strlen x == 0 = (acc, seen).
 uniqStep (acc, seen) x =
   k = S.toLower x;
   case MutMap.member k seen of
-    (True, s1) -> (acc, s1)
-  | (False, s1) -> (x :: acc, MutMap.insert k Unit s1).
+      (True, s1) -> (acc, s1)
+    | (False, s1) -> (x :: acc, MutMap.insert k Unit s1).
 
 # ---- the console: the data, live -------------------------------------------------------------------
 # A command and what it answered go on this tab's console (the newest 40
@@ -523,27 +571,28 @@ console m sid s cmd =
   line = S.trim cmd;
   (m2, out) = run m s line;
   s2 = sGet m2.sess sid;
-  con = (case (line == "clear") of True -> Nil | False -> List.take 40 (out :: "> {line}" :: s2.con));
-  (sPut m2 { s2 | con = con }, setLocals sid [G.assign @Client.cmd ""] :: Nil).
+  con = if line == "clear" then Nil else List.take 40 (out :: "> {line}" :: s2.con);
+  (sPut m2 { s2 | con = con }, [setLocals sid [G.assign @Client.cmd ""]]).
 
 run m s line = case S.words line of
     Nil -> (m, helpText)
-  | w :: r -> runW m s (S.toLower w) (S.trim (S.dropLeft (strlen w) line)).
-runW m s w rest | (w == "help") = (m, helpText).
-runW m s w rest | (w == "clear") = (m, "").
-runW m s w rest | (w == "stats") = (m, statsText m).
-runW m s w rest | (w == "find") = (m, findText m rest).
-runW m s w rest | (w == "show") = (m, withItem m rest showText).
-runW m s w rest | (w == "history") = (m, historyText m (idOf rest)).
-runW m s w rest | (w == "places") = (m, countsText (ranked (List.map (fn it -> it.loc) m.items))).
-runW m s w rest | (w == "tags") = (m, countsText (ranked (List.concatMap (fn it -> it.tags) m.items))).
-runW m s w rest | (w == "spots") = (m, spotsText m rest).
-runW m s w rest | (w == "move") = moveCmd m s (splitArrow rest).
-runW m s w rest | (w == "rename") = renameCmd m s (splitArrow rest).
-runW m s w rest | (w == "retag") = retagCmd m s (splitArrow rest).
-runW m s w rest | (w == "delete") = deleteCmd m s (idOf rest).
-runW m s w rest | (w == "rebuild") = rebuildCmd m.
-runW m s w rest = (m, "unknown: {w} (try help)").
+  | w :: _ -> runW m s (S.toLower w) (line |> S.dropLeft (strlen w) |> S.trim).
+
+runW m _ "help" _      = (m, helpText).
+runW m _ "clear" _     = (m, "").
+runW m _ "stats" _     = (m, statsText m).
+runW m _ "find" rest   = (m, findText m rest).
+runW m _ "show" rest   = (m, withItem m rest showText).
+runW m _ "history" r   = (m, historyText m (idOf r)).
+runW m _ "places" _    = (m, m.items |> List.map (fn it -> it.loc) |> ranked |> countsText).
+runW m _ "tags" _      = (m, m.items |> List.concatMap (fn it -> it.tags) |> ranked |> countsText).
+runW m _ "spots" rest  = (m, spotsText m rest).
+runW m s "move" rest   = moveCmd m s (splitArrow rest).
+runW m s "rename" rest = renameCmd m s (splitArrow rest).
+runW m s "retag" rest  = retagCmd m s (splitArrow rest).
+runW m s "delete" rest = deleteCmd m s (idOf rest).
+runW m _ "rebuild" _   = rebuildCmd m.
+runW m _ w _           = (m, "unknown: {w} (try help)").
 
 helpText = S.join "\n"
   [ "stats                       counts, the log, who is signed in"
@@ -560,100 +609,113 @@ helpText = S.join "\n"
   , "clear                       empty this console" ].
 
 # "#12", "12" -> 12; anything else is 0, which no item has
-idOf s = num (S.trim (case S.startsWith "#" (S.trim s) of True -> S.dropLeft 1 (S.trim s) | False -> s)).
+idOf s =
+  t = S.trim s;
+  num (if S.startsWith "#" t then t |> S.dropLeft 1 |> S.trim else t).
+
+splitOn sep s = case S.indexOf sep s of
+    Option.Some i -> (s |> S.left i |> S.trim, s |> S.dropLeft (i + strlen sep) |> S.trim)
+  | Option.None -> (S.trim s, "").
+
 # "a -> b" -> (a, b); no arrow: (s, "")
-splitArrow s = case S.indexOf "->" s of
-    Option.Some i -> (S.trim (S.left i s), S.trim (S.dropLeft (i + 2) s))
-  | Option.None -> (S.trim s, "").
+splitArrow = splitOn "->".
 # "room / spot" -> (room, spot)
-splitSlash s = case S.indexOf "/" s of
-    Option.Some i -> (S.trim (S.left i s), S.trim (S.dropLeft (i + 1) s))
-  | Option.None -> (S.trim s, "").
+splitSlash = splitOn "/".
 
 withItem m arg f = case findItem m.items (idOf arg) of
     Option.None -> "no item {S.trim arg} (find WORDS gives ids)"
   | Option.Some it -> f it.
+
 itemRow it = "#{S.padRight 4 " " "{it.id}"} {it.name}  @ {place it}".
-plural 1 one many = "1 {one}".
-plural n one many = "{n} {many}".
+
+plural 1 one _ = "1 {one}".
+plural n _ many = "{n} {many}".
 
 statsText m =
-  places = List.length (List.unique (List.map (fn it -> S.toLower it.loc) m.items));
-  tags = List.length (List.unique (List.concatMap (fn it -> it.tags) m.items));
+  places = m.items |> List.map (fn it -> S.toLower it.loc) |> List.unique |> List.length;
+  tags = m.items |> List.concatMap (fn it -> it.tags) |> List.unique |> List.length;
+  online = m.sess |> List.map (fn x -> x.user) |> List.filter (fn u -> strlen u > 0) |> S.join ", ";
   S.join "\n"
     [ "{plural (List.length m.items) "item" "items"} in {plural places "place" "places"}, {plural tags "tag" "tags"}"
-    , "{plural (List.length m.members) "member" "members"} ({S.join ", " (List.map memName m.members)}), {plural (List.length m.devices) "signed-in device" "signed-in devices"}"
-    , "signed in now: {S.join ", " (List.filter (fn u -> strlen u > 0) (List.map (fn x -> x.user) m.sess))}"
+    , "{plural (List.length m.members) "member" "members"} ({m.members |> List.map memName |> S.join ", "}), {plural (List.length m.devices) "signed-in device" "signed-in devices"}"
+    , "signed in now: {online}"
     , "log {m.path}: {m.events} lines ({m.skipped} unreadable), next id {m.nextId}"
     , "up since {Clock.stamp m.booted}" ].
 
-findText m words | strlen words == 0 = "find WORDS".
+findText _ words | strlen words == 0 = "find WORDS".
 findText m words =
-  hits = List.filter (matches (S.toLower words)) m.items;
+  hits = m.items |> List.filter (matches (S.toLower words));
   case hits of
-    Nil -> "nothing matches \"{words}\""
-  | _ -> S.join "\n" (List.map itemRow (List.take 25 hits) + (case List.length hits > 25 of True -> ["... and {List.length hits - 25} more"] | False -> Nil)).
+      Nil -> "nothing matches \"{words}\""
+    | _ ->
+        more = if List.length hits > 25 then ["... and {List.length hits - 25} more"] else Nil;
+        hits |> List.take 25 |> List.map itemRow |> (fn rows -> S.join "\n" (rows + more)).
 
-showText it = S.join "\n"
-  ( "#{it.id} {it.name}"
-  :: "  place  {place it}"
-  :: "  tags   {S.join ", " it.tags}"
-  :: "  added  {Clock.stamp it.created}, updated {Clock.stamp it.at} by {it.by}"
-  :: List.map (fn mv -> "  moved from {mv.from} on {Clock.stamp mv.at}") it.moves
-  + (case strlen it.desc == 0 of True -> Nil | False -> ["  notes  " + S.replace "\n" "\n         " it.desc]) ).
+showText it =
+  notes = if strlen it.desc == 0 then Nil else ["  notes  " + S.replace "\n" "\n         " it.desc];
+  S.join "\n"
+    ( "#{it.id} {it.name}"
+    :: "  place  {place it}"
+    :: "  tags   {S.join ", " it.tags}"
+    :: "  added  {Clock.stamp it.created}, updated {Clock.stamp it.at} by {it.by}"
+    :: List.map (fn mv -> "  moved from {mv.from} on {Clock.stamp mv.at}") it.moves
+    + notes ).
 
 # from the disk, not the model: every line that wrote this item, oldest first
 historyText m id = case File.lines m.path of
     Err why -> "cannot read the log: {why}"
   | Ok ls ->
-      evs = List.filter (fn op -> about id op) (List.map parseLine ls);
+      evs = ls |> List.map parseLine |> List.filter (about id);
       case evs of
-        Nil -> "no item #{id} in the log"
-      | _ -> S.join "\n" (List.map histLine (List.drop (Int.max 0 (List.length evs - 30)) evs)).
+          Nil -> "no item #{id} in the log"
+        | _ -> evs |> List.drop (Int.max 0 (List.length evs - 30)) |> List.map histLine |> S.join "\n".
+
 # an item or delete line about item `id`
 about id (Put it) = it.id == id.
 about id (Rename it) = it.id == id.
-about id (Del n by at) = n == id.
-about id op = False.
-histLine (Del id by at) = "{Clock.stamp at}  {S.padRight 8 " " by} deleted".
+about id (Del n _ _) = n == id.
+about _ _ = False.
+
+histLine (Del _ by at) = "{Clock.stamp at}  {S.padRight 8 " " by} deleted".
 histLine (Put it) = itemHist it "".
 histLine (Rename it) = itemHist it " (place renamed)".
-histLine op = "".
+histLine _ = "".
+
 itemHist it why = "{Clock.stamp it.at}  {S.padRight 8 " " it.by} {it.name} @ {place it}  [{S.join ", " it.tags}]{why}".
 
-countsText kcs | List.isEmpty kcs = "none yet".
-countsText kcs = S.join "\n" (List.map (fn kc -> (case kc of (k, c) -> "{S.padLeft 5 " " "{c}"}  {k}")) kcs).
+countsText Nil = "none yet".
+countsText kcs = kcs |> List.map (fn kc -> (k, c) = kc; "{S.padLeft 5 " " "{c}"}  {k}") |> S.join "\n".
 
-spotsText m p | strlen p == 0 = "spots PLACE".
+spotsText _ p | strlen p == 0 = "spots PLACE".
 spotsText m p =
-  here = List.filter (fn it -> ((S.toLower it.loc) == (S.toLower p))) m.items;
+  here = m.items |> List.filter (fn it -> S.toLower it.loc == S.toLower p);
   case here of
-    Nil -> "no items in {p}"
-  | _ -> countsText (ranked (List.map (fn it -> (case strlen it.sub == 0 of True -> "(no spot)" | False -> it.sub)) here)).
+      Nil -> "no items in {p}"
+    | _ -> here |> List.map (fn it -> if strlen it.sub == 0 then "(no spot)" else it.sub) |> ranked |> countsText.
 
 moveCmd m s (l, r) = case findItem m.items (idOf l) of
     Option.None -> (m, "move ID -> PLACE [/ SPOT]")
   | Option.Some it ->
       (loc, sub) = splitSlash r;
-      (case strlen loc == 0 of
-        True -> (m, "move ID -> PLACE [/ SPOT]")
-      | False ->
-          new = { it | loc = S.left 60 loc, sub = S.left 60 sub };
-          (commit m (itemLine new s.user (Clock.now Unit)), "#{it.id} {it.name}: {place it} -> {place new}")).
+      if strlen loc == 0 then (m, "move ID -> PLACE [/ SPOT]")
+      else
+        new = { it | loc = S.left 60 loc, sub = S.left 60 sub };
+        (commit m (itemLine new s.user (Clock.now Unit)), "#{it.id} {it.name}: {place it} -> {place new}").
 
-renameCmd m s (old, new) | strlen old == 0 or strlen new == 0 = (m, "rename OLD -> NEW").
+renameCmd m _ (old, new) | strlen old == 0 or strlen new == 0 = (m, "rename OLD -> NEW").
 renameCmd m s (old, new) =
-  hits = List.filter (fn it -> ((S.toLower it.loc) == (S.toLower old))) m.items;
+  hits = m.items |> List.filter (fn it -> S.toLower it.loc == S.toLower old);
   now = Clock.now Unit;
   case hits of
-    Nil -> (m, "no items in {old} (places lists them)")
-  | _ -> (List.fold (fn mm it -> commit mm (renameLine { it | loc = S.left 60 new } s.user now)) m hits,
-          "{old} -> {new} on {plural (List.length hits) "item" "items"}").
+      Nil -> (m, "no items in {old} (places lists them)")
+    | _ ->
+        m2 = List.fold (fn mm it -> commit mm (renameLine { it | loc = S.left 60 new } s.user now)) m hits;
+        (m2, "{old} -> {new} on {plural (List.length hits) "item" "items"}").
 
 retagCmd m s (l, r) = case findItem m.items (idOf l) of
     Option.None -> (m, "retag ID -> TAGS")
   | Option.Some it ->
-      new = { it | tags = List.take 12 (tagsOf r) };
+      new = { it | tags = r |> tagsOf |> List.take 12 };
       (commit m (itemLine new s.user (Clock.now Unit)), "#{it.id} {it.name}: [{S.join ", " new.tags}]").
 
 deleteCmd m s id = case findItem m.items id of
@@ -664,63 +726,64 @@ deleteCmd m s id = case findItem m.items id of
 rebuildCmd m = case File.lines m.path of
     Err why -> (m, "cannot read the log: {why}")
   | Ok ls ->
-      d = replayed initModel (List.filter (fn l -> strlen l > 0) ls);
-      wrong = List.length (List.filter (fn it -> findItem m.items it.id != Option.Some it) d.items)
-            + List.length (List.filter (fn it -> findItem d.items it.id == Option.None) m.items);
-      case wrong == 0 of
-        True -> (m, "the model matches the log: {d.events} lines, {plural (List.length d.items) "item" "items"}")
-      | False -> ({ m | items = d.items, nextId = d.nextId }, "rebuilt from the log: {plural wrong "item" "items"} corrected").
+      d = ls |> List.filter (fn l -> strlen l > 0) |> replayed initModel;
+      wrong = (d.items |> List.filter (fn it -> findItem m.items it.id != Option.Some it) |> List.length)
+            + (m.items |> List.filter (fn it -> findItem d.items it.id == Option.None) |> List.length);
+      if wrong == 0
+        then (m, "the model matches the log: {d.events} lines, {plural (List.length d.items) "item" "items"}")
+        else ({ m | items = d.items, nextId = d.nextId }, "rebuilt from the log: {plural wrong "item" "items"} corrected").
 
 # ---- the household ---------------------------------------------------------------------------
 
-addMember m sid s (name0, pw) =
-  name = S.toLower (S.trim name0);
-  case not (wordy name) of
-    True -> refuse m sid "a name is 1 to 16 letters or digits"
-  | False -> (case hasMember m name of
-      True -> refuse m sid "{name} is already a member"
-    | False -> (case strlen pw < 8 of
-        True -> refuse m sid "a password is at least 8 characters"
-      | False ->
-          salt = randomHex Unit;
-          m2 = commit m (memberLine name salt (pwHash salt pw) (Clock.now Unit));
-          also (say m2 sid "{name} can sign in now") (setLocals sid [G.assign @Client.mname "", G.assign @Client.mpw ""] :: Nil))).
+addMember m sid _ (name0, pw) =
+  name = name0 |> S.trim |> S.toLower;
+  if not (wordy name) then refuse m sid "a name is 1 to 16 letters or digits"
+  else if hasMember m name then refuse m sid "{name} is already a member"
+  else if strlen pw < 8 then refuse m sid "a password is at least 8 characters"
+  else
+    salt = randomHex Unit;
+    m2 = commit m (memberLine name salt (pwHash salt pw) (Clock.now Unit));
+    also (say m2 sid "{name} can sign in now") [setLocals sid [G.assign @Client.mname "", G.assign @Client.mpw ""]].
 
-password m sid s pw | strlen pw < 8 = refuse m sid "a password is at least 8 characters".
+password m sid _ pw | strlen pw < 8 = refuse m sid "a password is at least 8 characters".
 password m sid s pw =
   salt = randomHex Unit;
   m2 = commit m (memberLine s.user salt (pwHash salt pw) (Clock.now Unit));
-  also (say m2 sid "password changed") (setLocals sid [G.assign @Client.npw ""] :: Nil).
+  also (say m2 sid "password changed") [setLocals sid [G.assign @Client.npw ""]].
 
 # every device of this member is forgotten, then this one is remembered again
 forgetDevices m sid s =
   now = Clock.now Unit;
-  n = List.length (List.filter (fn d -> ((devName d) == s.user)) m.devices);
+  n = m.devices |> List.filter (fn d -> devName d == s.user) |> List.length;
   m2 = commit m (revokeLine s.user now);
-  m3 = (case strlen s.tried > 0 of True -> commit m2 (deviceLine s.user (Digest.sha256 s.tried) now) | False -> m2);
+  m3 = if strlen s.tried > 0 then commit m2 (deviceLine s.user (Digest.sha256 s.tried) now) else m2;
   say m3 sid "signed out {Int.max 0 (n - 1)} other devices".
 
 # every page mirrors its locals, a third of a second after they change
-subs m = Live.SyncClientState 300 (ClientState client) :: Nil.
+subs _ = [Live.SyncClientState 300 (ClientState client)].
 
 # ---- what a session sees (Live.serveProjected) -------------------------------------------------
 # Its own search, sorted and filtered here; the counts; the chips.  A session
 # whose projection did not change renders nothing.
 
-matches q it = List.all (fn w -> hit w it) (S.words q).
+matches q it = q |> S.words |> List.all (fn w -> hit w it).
 hit w it = S.contains w (S.toLower it.name) or S.contains w (S.toLower it.loc) or S.contains w (S.toLower it.sub)
         or S.contains w (S.toLower it.desc) or List.any (fn t -> S.contains w t) it.tags.
 
-sorted key items = case key of
-    ByName -> List.sortBy Order.string (fn it -> S.toLower it.name) items
-  | ByPlace -> List.sortBy Order.string (fn it -> S.toLower "{place it} {it.name}") items
-  | Recent -> List.sortBy (Order.reverse Order.int) (fn it -> it.at) items.
+sorted ByName items  = List.sortBy Order.string (fn it -> S.toLower it.name) items.
+sorted ByPlace items = List.sortBy Order.string (fn it -> S.toLower "{place it} {it.name}") items.
+sorted Recent items  = List.sortBy (Order.reverse Order.int) (fn it -> it.at) items.
 
 # the most used values first: (value, count).  groupBy groups RUNS of equal
 # values, hence the sort first
-ranked xs = List.sortBy (Order.reverse Order.int) (fn kc -> (case kc of (k, c) -> c))
-              (List.map (fn g -> (case g of (k, vs) -> (k, List.length vs))) (List.groupBy (fn x -> x) (List.sortBy Order.string (fn x -> x) xs))).
-firsts kcs = List.map (fn kc -> (case kc of (k, c) -> k)) kcs.
+ranked xs =
+  xs
+  |> List.sortBy Order.string (fn x -> x)
+  |> List.groupBy (fn x -> x)
+  |> List.map (fn g -> (k, vs) = g; (k, List.length vs))
+  |> List.sortBy (Order.reverse Order.int) (fn kc -> (_, c) = kc; c).
+
+firsts kcs = List.map (fn kc -> (k, _) = kc; k) kcs.
 
 noView = { clientReady = False, signed = 0, user = "", toast = "", role = "", theme = 1, editing = 0 - 1, items = Nil, total = 0, shown = 0,
            page = 0, pages = 1, first = 0, q = "", places = Nil, tags = Nil, quick = Nil, members = Nil, devices = 0, online = 0,
@@ -732,30 +795,30 @@ noView = { clientReady = False, signed = 0, user = "", toast = "", role = "", th
 # the admin pane gets them, so the others do not re-render for them.
 project size keep sid m =
   s = sGet m.sess sid;
-  case (s.user == "") of
-    True -> { noView | clientReady = s.clientReady, toast = s.toast, role = s.role, theme = s.theme }
-  | False ->
-      hits = sorted s.sort (List.filter (matches (S.toLower s.q)) m.items);
-      n = List.length hits;
-      page = Pagination.plan size n s.page;
-      onAdmin = s.pane == Admin;
-      places = firsts (ranked (List.map (fn it -> it.loc) m.items));
-      tags = firsts (ranked (List.concatMap (fn it -> it.tags) m.items));
-      { clientReady = True, signed = 1, user = s.user, toast = s.toast, role = s.role, theme = s.theme, editing = s.editing,
-        items = List.take size (List.drop page.first hits), total = List.length m.items, shown = n,
-        page = page.index, pages = page.pages, first = page.first, q = s.q,
-        places = List.take 8 places, tags = List.take 12 tags,
-        quick = List.take 18 (List.unique (tags + quickTags)),
-        members = List.map memName m.members,
-        devices = List.length (List.filter (fn d -> ((devName d) == s.user)) m.devices),
-        online = List.length (List.filter (fn x -> strlen x.user > 0) m.sess),
-        events = m.events, booted = m.booted, con = s.con,
-        nplaces = List.length places, ntags = List.length tags, ndevices = List.length m.devices, skipped = m.skipped,
-        pageSize = size, keep = keep,
-        prof = (case onAdmin of True -> m.prof | False -> noProf),
-        mem = (case onAdmin of True -> Sys.memInfo 0 | False -> Nil),
-        grows = (case onAdmin of True -> Sys.memStats 0 | False -> (0, 0)),
-        harts = Sys.harts Unit }.
+  if s.user == "" then
+    { noView | clientReady = s.clientReady, toast = s.toast, role = s.role, theme = s.theme }
+  else
+    hits = m.items |> List.filter (matches (S.toLower s.q)) |> sorted s.sort;
+    n = List.length hits;
+    page = Pagination.plan size n s.page;
+    onAdmin = s.pane == Admin;
+    places = m.items |> List.map (fn it -> it.loc) |> ranked |> firsts;
+    tags = m.items |> List.concatMap (fn it -> it.tags) |> ranked |> firsts;
+    { clientReady = True, signed = 1, user = s.user, toast = s.toast, role = s.role, theme = s.theme, editing = s.editing,
+      items = hits |> List.drop page.first |> List.take size, total = List.length m.items, shown = n,
+      page = page.index, pages = page.pages, first = page.first, q = s.q,
+      places = List.take 8 places, tags = List.take 12 tags,
+      quick = (tags + quickTags) |> List.unique |> List.take 18,
+      members = List.map memName m.members,
+      devices = m.devices |> List.filter (fn d -> devName d == s.user) |> List.length,
+      online = m.sess |> List.filter (fn x -> strlen x.user > 0) |> List.length,
+      events = m.events, booted = m.booted, con = s.con,
+      nplaces = List.length places, ntags = List.length tags, ndevices = List.length m.devices, skipped = m.skipped,
+      pageSize = size, keep = keep,
+      prof = if onAdmin then m.prof else noProf,
+      mem = if onAdmin then Sys.memInfo 0 else Nil,
+      grows = if onAdmin then Sys.memStats 0 else (0, 0),
+      harts = Sys.harts Unit }.
 
 # ---- view ------------------------------------------------------------------------------------------
 # Mobile first: one column the width of a phone, capped on a desktop; buttons
@@ -765,10 +828,6 @@ project size keep sid m =
 
 locals = G.locals @Client client.
 
-
-
-
-# the remembered device lives in a hidden input, so the page's script can fill it
 # the page: its look is the household's day or night (Appearance), the column a
 # broad reading one with the client state declared on it; the remembered device
 # lives in a hidden input so the page's script can fill it
@@ -782,16 +841,19 @@ root v kids =
 # ones it drew most recently.  The writer's cache also holds its own render
 # statistics, which the admin pane shows.
 noRender = { st = noStat, hits = 0, misses = 0, kept = 0 }.
-view keep sid v old = case old of (cardsOld, rs) ->
-  (case v.signed == 0 of
-    True -> (G.renderStyled (root v (case v.clientReady of True -> [loginView v] | False -> Nil)), old)
-  | False ->
-      t0 = Sys.timeUs Unit;
-      (case G.cacheMany (fn it -> "{it.id}") itemCard v.items (G.cacheBegin "inventory-card-v1" verify cardsOld) of (cards, cc) ->
-        out = G.renderStyled (root v (signedIn v cards rs));
-        kept = G.cacheRetain keep cc;
-        (h, mi, n) = G.cacheStats cc;
-        (out, (kept, { st = note rs.st (Sys.timeUs Unit - t0), hits = rs.hits + h, misses = rs.misses + mi, kept = G.cacheSize kept })))).
+
+view keep _ v old =
+  (cardsOld, rs) = old;
+  if v.signed == 0 then
+    (G.renderStyled (root v (if v.clientReady then [loginView v] else Nil)), old)
+  else
+    t0 = Sys.timeUs Unit;
+    (cards, cc) = G.cacheMany (fn it -> "{it.id}") itemCard v.items (G.cacheBegin "inventory-card-v1" verify cardsOld);
+    out = G.renderStyled (root v (signedIn v cards rs));
+    kept = G.cacheRetain keep cc;
+    (h, mi, _) = G.cacheStats cc;
+    (out, (kept, { st = note rs.st (Sys.timeUs Unit - t0), hits = rs.hits + h, misses = rs.misses + mi, kept = G.cacheSize kept })).
+
 verify = Program.envOr "0" "INV_VIEW_VERIFY" == "1".
 
 # the household's buttons: pills a thumb can hit; chips are the small ones
@@ -801,8 +863,6 @@ overline = { UI.txt | size = UI.Overline, tone = UI.Muted }.
 caption = { UI.txt | size = UI.Caption, tone = UI.Muted }.
 btn label attrs = UI.button pill attrs label.
 primary label attrs = UI.button { pill | kind = UI.Primary } attrs label.
-
-
 
 loginView v =
   UI.card { UI.panel | raised = True, gap = 3, pad = 5 }
@@ -820,17 +880,20 @@ signedIn v cards rs =
   , itemsPane v cards
   , housePane v
   , adminPane v rs ].
-roleText v role | (v.role == role) = v.toast.
-roleText v role = "".
+
+roleText v role | v.role == role = v.toast.
+roleText _ _ = "".
 
 # on a phone the title takes its own line and the pane buttons go below it
 # a tab: a pill that shows which pane is open (a client local, no server round trip)
 tab p label = UI.button { pill | vary = [UI.onState @Client.pane p [UI.Inverted]] } [G.setTo @Client.pane p] label.
+
 header v =
   UI.hstack { UI.stack | gap = 2, align = UI.Center, vary = [UI.OnNarrow [UI.Stacked, UI.AlignOf UI.Start]] }
     [ UI.vstack { UI.stack | fill = UI.Grow }
         [ UI.label overline "home inventory", UI.text { UI.txt | size = UI.Hero, tabular = True } (things v.total) ]
     , UI.hstack { UI.stack | gap = 2, wrap = True } [tab Items "items", tab House "household", tab Admin "admin"] ].
+
 things 1 = "1 thing".
 things n = "{n} things".
 
@@ -844,11 +907,11 @@ itemsPane v cards =
         , UI.button chip [G.hideIf @Client.q "", G.setTo @Client.q "", now] "clear search" ]
     :: chipRow (List.map (fn p -> UI.button { chip | vary = [UI.Always [UI.Rigid]] } [G.setTo @Client.q (S.toLower p), now] p) v.places)
     :: chipRow (List.map (fn t -> UI.button { chip | vary = [UI.Always [UI.Rigid]] } [G.setTo @Client.q t, now] "#{t}") v.tags)
-    :: (case v.editing == 0 of True -> [editor v] | False -> Nil)
+    :: (if v.editing == 0 then [editor v] else Nil)
     + [ UI.textWith caption [B.mark listHook ""] (countText v)
-      , UI.keyed "items" (UI.vstack { UI.stack | gap = 3 } (case List.isEmpty cards of True -> [empty v] | False -> inPlace v cards))
+      , UI.keyed "items" (UI.vstack { UI.stack | gap = 3 } (if List.isEmpty cards then [empty v] else inPlace v cards))
       , pager v ]).
-# the pager, when there is more than one page
+
 # the pager, when there is more than one page
 pager v | v.pages <= 1 = UI.none Unit.
 pager v =
@@ -856,30 +919,33 @@ pager v =
     [ pageBtn "previous" (v.page - 1) (v.page == 0)
     , UI.text { caption | align = UI.Center, tabular = True, fill = UI.Grow } "page {v.page + 1} of {v.pages}"
     , pageBtn "next" (v.page + 1) (v.page + 1 >= v.pages) ].
-pageBtn label n off = UI.button { pill | vary = (if off then [UI.Always [UI.Dimmed]] else Nil) } [G.send codec (Page n), B.mark pagerHook ""] label.
+
+pageBtn label n off = UI.button { pill | vary = if off then [UI.Always [UI.Dimmed]] else Nil } [G.send codec (Page n), B.mark pagerHook ""] label.
+
 # the item being edited is its editor, where its card was
 inPlace v cards | v.editing <= 0 = cards.
-inPlace v cards = List.zipWith (fn it card -> (case it.id == v.editing of True -> G.key "edit-{it.id}" (editor v) | False -> card)) v.items cards.
+inPlace v cards = List.zipWith (fn it card -> if it.id == v.editing then G.key "edit-{it.id}" (editor v) else card) v.items cards.
+
 # what changes the search is mirrored at once (std/livejs data-sync-now), not
 # on the next tick: the list is what someone is waiting to see
 now = G.syncNow.
 sortBtn key label = UI.button { chip | vary = [UI.onState @Client.sort key [UI.Inverted]] } [G.setTo @Client.sort key, now] label.
+
 countText v | v.shown == 0 = "".
 countText v =
-  range = (case v.pages <= 1 of True -> "" | False -> "{v.first + 1}-{v.first + List.length v.items} of ");
-  case strlen v.q == 0 of
-    True -> (case v.pages <= 1 of True -> "" | False -> "{range}{v.total}")
-  | False -> "{range}{v.shown} matching \"{v.q}\"".
-empty v | v.total == 0 = UI.card { UI.panel | pad = 5 } [UI.label { caption | size = UI.Body, align = UI.Center } "Nothing here yet. Add the first thing with + add."].
-empty v = UI.card { UI.panel | pad = 5 } [UI.label { caption | size = UI.Body, align = UI.Center } "Nothing matches."].
+  range = if v.pages <= 1 then "" else "{v.first + 1}-{v.first + List.length v.items} of ";
+  if strlen v.q == 0 then (if v.pages <= 1 then "" else "{range}{v.total}")
+  else "{range}{v.shown} matching \"{v.q}\"".
 
-# a tap on a place or a tag searches for it; a row scrolls sideways on a phone
+empty v | v.total == 0 = UI.card { UI.panel | pad = 5 } [UI.label { caption | size = UI.Body, align = UI.Center } "Nothing here yet. Add the first thing with + add."].
+empty _ = UI.card { UI.panel | pad = 5 } [UI.label { caption | size = UI.Body, align = UI.Center } "Nothing matches."].
+
 # a tap on a place or a tag searches for it; a row scrolls sideways on a phone
 chipRow kids = UI.hstack { UI.stack | gap = 2, scrollX = True } kids.
 
 editor v =
   UI.card { UI.panel | raised = True, gap = 3 }
-      [ UI.label { UI.txt | size = UI.Heading } (case v.editing == 0 of True -> "Add an item" | False -> "Edit item")
+      [ UI.label { UI.txt | size = UI.Heading } (if v.editing == 0 then "Add an item" else "Edit item")
       , UI.labelled "name" (UI.input { UI.field | placeholder = "e.g. USB-C cable", maxLength = 120 } [G.bind @Client.name])
       , UI.hstack { UI.stack | gap = 2, vary = [UI.OnNarrow [UI.Stacked]] }
           [ UI.labelled "room or place" (UI.input { UI.field | placeholder = "e.g. study", maxLength = 60, suggest = "off" } [G.bind @Client.loc, B.autocompleteFrom "loc"])
@@ -888,7 +954,7 @@ editor v =
       , UI.labelled "tags, comma separated" (UI.input { UI.field | placeholder = "e.g. electronics, cables", caps = False, suggest = "off" } [G.bind @Client.tags, B.autocompleteFrom "tags"])
       , UI.hstack { UI.stack | gap = 2, wrap = True } (List.map (fn t -> UI.button chip [G.send codec (AddTag t)] t) v.quick)
       , UI.hstack { UI.stack | gap = 2 }
-          [ UI.button { pill | kind = UI.Primary, vary = [UI.Always [UI.FillOf UI.Grow]] } [G.send codec Save] (case v.editing == 0 of True -> "add item" | False -> "save")
+          [ UI.button { pill | kind = UI.Primary, vary = [UI.Always [UI.FillOf UI.Grow]] } [G.send codec Save] (if v.editing == 0 then "add item" else "save")
           , btn "cancel" [G.send codec Cancel] ] ].
 
 itemCard : Item -> G.Node .
@@ -898,16 +964,17 @@ itemCard it =
         [ UI.label { UI.txt | size = UI.Heading, fill = UI.Grow } it.name
         , UI.button chip [G.send codec (Edit it.id)] "edit"
         , UI.button chip [G.setTo @Client.confirm it.id] "delete" ]
-    :: UI.hstack { UI.stack | gap = 2, align = UI.Center, wrap = True } (UI.badge UI.Success it.loc :: (case strlen it.sub == 0 of True -> Nil | False -> [UI.badge UI.Muted it.sub]))
-    :: (case strlen it.desc == 0 of True -> Nil | False -> [UI.label { UI.txt | size = UI.Caption, pre = True } it.desc])
-    + (case List.isEmpty it.tags of True -> Nil | False -> [UI.hstack { UI.stack | gap = 1, wrap = True } (List.map (fn t -> UI.button chip [G.setTo @Client.q t, now] "#{t}") it.tags)])
+    :: UI.hstack { UI.stack | gap = 2, align = UI.Center, wrap = True } (UI.badge UI.Success it.loc :: (if strlen it.sub == 0 then Nil else [UI.badge UI.Muted it.sub]))
+    :: (if strlen it.desc == 0 then Nil else [UI.label { UI.txt | size = UI.Caption, pre = True } it.desc])
+    + (if List.isEmpty it.tags then Nil else [UI.hstack { UI.stack | gap = 1, wrap = True } (List.map (fn t -> UI.button chip [G.setTo @Client.q t, now] "#{t}") it.tags)])
     + [ UI.label caption (metaText it)
       , UI.hstackWith { UI.stack | gap = 2, align = UI.Center, wrap = True } [G.showIf @Client.confirm it.id]
           [ UI.label { caption | tone = UI.Warning, fill = UI.Grow } "Delete {it.name}?"
           , UI.button { pill | kind = UI.Destructive } [G.send codec (Delete it.id)] "delete"
           , btn "keep" [G.setTo @Client.confirm 0] ] ]).
+
 metaText it =
-  moved = (case it.moves of Nil -> "" | mv :: r -> " · moved from {mv.from} on {Clock.date mv.at}");
+  moved = case it.moves of Nil -> "" | mv :: _ -> " · moved from {mv.from} on {Clock.date mv.at}";
   "added {Clock.date it.created} · updated {Clock.date it.at} by {it.by}{moved}".
 
 housePane v =
@@ -930,6 +997,7 @@ housePane v =
             , UI.input { UI.field | kind = UI.Password, placeholder = "their password", suggest = "new-password" } [G.bind @Client.mpw] ]
         , btn "add member" [G.sendWith2 codec AddMember @Client.mname @Client.mpw] ]
     , UI.text caption "{v.events} changes in the log · {v.online} signed in now · up since {Clock.stamp v.booted}" ].
+
 # ---- the admin pane: the numbers, the console, the profile ----------------------------------------
 
 adminPane v rs =
@@ -948,14 +1016,16 @@ adminPane v rs =
     , UI.cardWith { UI.panel | pad = 3 } [G.utilities [G.OverflowX G.OverflowAuto]]
         [ UI.text { UI.txt | size = UI.Mono, pre = True } (profileText v rs) ]
     , UI.hstack { UI.stack | gap = 2, align = UI.Center } [ UI.label caption "browser round trip: ", UI.labelWith caption [B.mark rttHook ""] "measuring" ] ].
+
 consoleText Nil = "type help and press enter".
-consoleText con = S.join "\n" (List.reverse con).
+consoleText con = con |> List.reverse |> S.join "\n".
+
 watch label v = UI.card { UI.panel | gap = 0, pad = 2, tile = True } [ UI.label overline label, UI.text { UI.txt | size = UI.Heading, tabular = True } v ].
 
 profileText v rs =
   S.join "\n"
     ( "update, per kind of event ({v.prof.nev} events since boot)"
-      :: List.map (fn e -> (case e of (k, st) -> "  {statLine k st}")) v.prof.upd
+      :: List.map (fn e -> (k, st) = e; "  {statLine k st}") v.prof.upd
       + ( "disk"
        :: "  {statLine "append" v.prof.flush}"
        :: "  boot: {v.prof.bootLines} lines folded in {v.prof.bootUs} us"
@@ -964,12 +1034,12 @@ profileText v rs =
        :: "  card cache: {rs.hits} hits, {rs.misses} misses; {rs.kept} cards kept of at most {v.keep} ({v.pageSize} a page)"
        :: "runtime"
        :: memLines v.mem v.grows
-       + ("  harts {v.harts}, tabs signed in {v.online}" :: Nil))).
-memLines mem (grows, mib) = case mem of
-    arena :: free :: reqs :: waits :: direct :: frees :: denied :: inl :: x ->
-      "  arena {arena / 1024} MiB reserved, {(arena - free) / 1024} MiB in use, grown {grows} times ({mib} MiB)"
-      :: "  memory actor: {reqs} requests, {waits} waits, {direct} direct, {inl} inline, {frees} frees, {denied} denied" :: Nil
-  | x -> "  memory: not sampled" :: Nil.
+       + ["  harts {v.harts}, tabs signed in {v.online}"])).
+
+memLines (arena :: free :: reqs :: waits :: direct :: frees :: denied :: inl :: _) (grows, mib) =
+  [ "  arena {arena / 1024} MiB reserved, {(arena - free) / 1024} MiB in use, grown {grows} times ({mib} MiB)"
+  , "  memory actor: {reqs} requests, {waits} waits, {direct} direct, {inl} inline, {frees} frees, {denied} denied" ].
+memLines _ _ = ["  memory: not sampled"].
 
 devicesText 1 = "this is your only signed-in device".
 devicesText n = "{n} devices signed in as you".
@@ -982,7 +1052,7 @@ sampleItem = { id = 1, name = "USB-C cable", loc = "study", sub = "top drawer", 
 sampleView = { noView | signed = 1, user = "sam", toast = "sample", role = "ok", editing = 0, items = [sampleItem], total = 41, shown = 41,
                page = 1, pages = 3, first = 20, q = "x", places = ["study"], tags = ["cables"], quick = quickTags, members = ["sam"], devices = 2,
                con = ["> help"] }.
-cssAll v = UI.css (G.El "div" Nil [root sampleView (signedIn sampleView [itemCard sampleItem, empty sampleView] noRender), loginView sampleView]).
+cssAll _ = UI.css (G.El "div" Nil [root sampleView (signedIn sampleView [itemCard sampleItem, empty sampleView] noRender), loginView sampleView]).
 
 # The page's own script: the remembered device.  Once the client has painted,
 # the token from localStorage goes into the hidden `tok` input (so it is
@@ -990,6 +1060,7 @@ cssAll v = UI.css (G.El "div" Nil [root sampleView (signedIn sampleView [itemCar
 # puts in `tok` -- a new token at sign-in, "" at sign-out or when it no longer
 # knows the token -- is what localStorage keeps.
 script = rttScript + LJ.src Unit + B.storage "inventory-device" "tok" tokenHook + autocomplete + pagerScript + consoleScript + pendingScript.
+
 # the page's hooks: one value each, placed by the view (`B.mark`) and read by
 # the scripts, so a name is written once
 consoleScope = B.Attribute "data-console-scope".
@@ -1033,76 +1104,90 @@ autocomplete = B.autocomplete Unit.
 # GET .../documents/inventory?pageSize=1000 saved to a file.  Items already
 # here (same name and place) are skipped, so an import can be run again.
 
-importFirestore path store = case File.readText path of
-    Err why -> Program.fail 1 "inventory: {why}"
-  | Ok text -> (case Json.parse text of
-      Err why -> Program.fail 1 "inventory: {path}: {why}"
+importFirestore path store =
+  parsed = File.readText path
+    |> Result.mapError (fn why -> "inventory: {why}")
+    |> Result.andThen (fn text -> Json.parse text |> Result.mapError (fn why -> "inventory: {path}: {why}"));
+  case parsed of
+      Err why -> Program.fail 1 why
     | Ok v ->
         o = openLog store;
         m = boot o store;
-        docs = Option.withDefault Nil (Option.andThen Json.asList (Json.field "documents" v));
+        docs = Json.field "documents" v |> Option.andThen Json.asList |> Option.withDefault Nil;
         its = List.filterMap fsItem docs;
         fresh = notHere m.items its;
         numbered = List.indexedMap (fn i it -> { it | id = m.nextId + i }) fresh;
-        _ = (case Journal.append (List.map (fn it -> itemLine it "import" it.at) numbered) o.journal of
-               Ok _ -> Unit | Err why -> Program.fail 1 "inventory: {why}");
+        _ = case Journal.append (List.map (fn it -> itemLine it "import" it.at) numbered) o.journal of
+            Ok _ -> Unit
+          | Err why -> Program.fail 1 "inventory: {why}";
         _ = print "[inventory] imported {List.length numbered} items ({List.length its - List.length fresh} already here)";
-        0).
+        0.
+
 # the imported items whose name and place (ignoring case) no item here has: the
 # items here go into a linear set of those keys once, then each is one lookup
 notHere items its =
   here = List.fold (fn s x -> MutMap.insert (placeKey x) Unit s) (MutMap.strings Unit) items;
-  (keep, h2) = List.fold (fn st it -> keepNew st it) (Nil, here) its;
+  (keep, h2) = List.fold keepNew (Nil, here) its;
   _ = MutMap.free h2;
   List.reverse keep.
+
 keepNew (acc, here) it = case MutMap.member (placeKey it) here of
     (True, h1) -> (acc, h1)
   | (False, h1) -> (it :: acc, h1).
+
 placeKey it =
   n = S.toLower it.name;
   "{strlen n}:{n}{S.toLower (place it)}".
-fsStr k doc = Option.withDefault "" (Option.andThen Json.asString (Json.at ["fields", k, "stringValue"] doc)).
-fsTime k doc = isoSecs (Option.withDefault "" (Option.andThen Json.asString (Json.at ["fields", k, "timestampValue"] doc))).
-fsTags doc = case Option.andThen Json.asList (Json.at ["fields", "tags", "arrayValue", "values"] doc) of
-    Option.Some xs -> List.filterMap (fn x -> Option.andThen Json.asString (Json.field "stringValue" x)) xs
-  | Option.None -> Nil.
+
+fsStr k doc = Json.at ["fields", k, "stringValue"] doc |> Option.andThen Json.asString |> Option.withDefault "".
+fsTime k doc = Json.at ["fields", k, "timestampValue"] doc |> Option.andThen Json.asString |> Option.withDefault "" |> isoSecs.
+fsTags doc =
+  Json.at ["fields", "tags", "arrayValue", "values"] doc
+  |> Option.andThen Json.asList
+  |> Option.map (List.filterMap (fn x -> Json.field "stringValue" x |> Option.andThen Json.asString))
+  |> Option.withDefault Nil.
+
 fsItem doc =
-  name = S.trim (fsStr "name" doc);
+  name = fsStr "name" doc |> S.trim;
   made = fsTime "createdAt" doc;
   upd = fsTime "updatedAt" doc;
-  case strlen name == 0 of
-    True -> Option.None
-  | False -> Option.Some { id = 0, name = S.left 120 name, loc = S.left 60 (S.trim (fsStr "location" doc)), sub = S.left 60 (S.trim (fsStr "subLocation" doc)),
-                           desc = S.left 2000 (S.trim (fsStr "description" doc)), tags = tagsOf (S.join "," (fsTags doc)),
-                           created = made, at = (case upd == 0 of True -> made | False -> upd), by = "import", moves = Nil }.
+  if strlen name == 0 then Option.None
+  else Option.Some {
+    id = 0, name = S.left 120 name,
+    loc = fsStr "location" doc |> S.trim |> S.left 60,
+    sub = fsStr "subLocation" doc |> S.trim |> S.left 60,
+    desc = fsStr "description" doc |> S.trim |> S.left 2000,
+    tags = doc |> fsTags |> S.join "," |> tagsOf,
+    created = made, at = if upd == 0 then made else upd, by = "import", moves = Nil }.
+
 # "2025-06-01T12:34:56.789Z" -> epoch seconds (UTC)
 isoSecs s | strlen s < 19 = 0.
 isoSecs s = days (num (substr s 0 4)) (num (substr s 5 2)) (num (substr s 8 2)) * 86400
           + num (substr s 11 2) * 3600 + num (substr s 14 2) * 60 + num (substr s 17 2).
+
 days y0 mo d =
-  y = (case mo <= 2 of True -> y0 - 1 | False -> y0);
+  y = if mo <= 2 then y0 - 1 else y0;
   era = y / 400;
   yoe = y - era * 400;
-  mp = (case mo > 2 of True -> mo - 3 | False -> mo + 9);
+  mp = if mo > 2 then mo - 3 else mo + 9;
   doy = (153 * mp + 2) / 5 + d - 1;
   era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468.
 
 # ---- a member from the command line ------------------------------------------------------------
 
 addMemberCli store name0 pw =
-  name = S.toLower (S.trim name0);
+  name = name0 |> S.trim |> S.toLower;
   o = openLog store;
   m = boot o store;
-  case not (wordy name) of
-    True -> Program.fail 2 "inventory: a member's name is 1 to 16 letters or digits"
-  | False -> (case strlen pw < 8 of
-      True -> Program.fail 2 "inventory: give a password of 8 or more characters (--password or INV_PASSWORD)"
-    | False ->
-        salt = randomHex Unit;
-        _ = (case Journal.append [memberLine name salt (pwHash salt pw) (Clock.now Unit)] o.journal of
-               Ok _ -> Unit | Err why -> Program.fail 1 "inventory: {why}");
-        _ = print "[inventory] {name} {case hasMember m name of True -> "has a new password" | False -> "is a member"}";
-        0).
+  if not (wordy name) then Program.fail 2 "inventory: a member's name is 1 to 16 letters or digits"
+  else if strlen pw < 8 then Program.fail 2 "inventory: give a password of 8 or more characters (--password or INV_PASSWORD)"
+  else
+    salt = randomHex Unit;
+    _ = case Journal.append [memberLine name salt (pwHash salt pw) (Clock.now Unit)] o.journal of
+        Ok _ -> Unit
+      | Err why -> Program.fail 1 "inventory: {why}";
+    _ = print "[inventory] {name} {if hasMember m name then "has a new password" else "is a member"}";
+    0.
 
 # ---- main ---------------------------------------------------------------------------------------------
 
@@ -1110,33 +1195,36 @@ setting d k v = case Decode.run (Decode.field k d) v of
     Ok x -> x
   | Err why -> Program.fail 2 "inventory: {why}".
 
-main = case Config.load { defaults = Json.object [("port", Json.Integer 6720), ("address", Json.Text "127.0.0.1"), ("store", Json.Text "data/inventory.log"),
-                                                  ("page-size", Json.Integer 20), ("cache-items", Json.Integer 200),
-                                                  ("member", Json.Text ""), ("password", Json.Text ""), ("import", Json.Text "")],
-                          file = Option.None, envPrefix = "INV_", args = Program.args Unit } of
-    Err why -> Program.fail 2 "inventory: {why}"
-  | Ok v ->
-      store = setting Decode.string "store" v;
-      member = setting Decode.string "member" v;
-      from = setting Decode.string "import" v;
-      (case strlen member > 0 of
-        True -> addMemberCli store member (setting Decode.string "password" v)
-      | False -> (case strlen from > 0 of
-          True -> importFirestore from store
-        | False ->
-            port = setting Decode.int "port" v;
-            address = setting Decode.string "address" v;
-            # Config decoding remains fallible; historical nonpositive values
-            # normalize to one before entering the contracted arithmetic core.
-            size = Int.max 1 (setting Decode.int "page-size" v);
-            # at least a page: the cards on show are always kept
-            keep = Int.max size (setting Decode.int "cache-items" v);
-            # the inventory is the log, folded at boot; std/live's own store holds
-            # nothing of the model, it is there because the driver wants one
-            cfg = { address = address, port = port, title = "Home inventory", store = "{store}.kvlog", journal = False,
-                    script = script, watch = Nil, rebuild = Nil, restart = Nil };
-            o = openLog store;
-            _ = Live.serveProjectedBody UI.body cfg { init = boot o store, update = update o.journal, subs = subs, fields = Nil, codec = codec,
-                                          project = project size keep, same = (fn a b -> a == b),
-                                          view = view keep, cache = (G.cacheEmpty Unit, noRender), css = cssAll };
-            0)).
+serveApp store v =
+  port = setting Decode.int "port" v;
+  address = setting Decode.string "address" v;
+  # Config decoding remains fallible; historical nonpositive values
+  # normalize to one before entering the contracted arithmetic core.
+  size = Int.max 1 (setting Decode.int "page-size" v);
+  # at least a page: the cards on show are always kept
+  keep = Int.max size (setting Decode.int "cache-items" v);
+  # the inventory is the log, folded at boot; std/live's own store holds
+  # nothing of the model, it is there because the driver wants one
+  cfg = { address = address, port = port, title = "Home inventory", store = "{store}.kvlog", journal = False,
+          script = script, watch = Nil, rebuild = Nil, restart = Nil };
+  o = openLog store;
+  _ = Live.serveProjectedBody UI.body cfg {
+    init = boot o store, update = update o.journal, subs = subs, fields = Nil, codec = codec,
+    project = project size keep, same = (fn a b -> a == b),
+    view = view keep, cache = (G.cacheEmpty Unit, noRender), css = cssAll };
+  0.
+
+main =
+  defaults = Json.object [
+    ("port", Json.Integer 6720), ("address", Json.Text "127.0.0.1"), ("store", Json.Text "data/inventory.log"),
+    ("page-size", Json.Integer 20), ("cache-items", Json.Integer 200),
+    ("member", Json.Text ""), ("password", Json.Text ""), ("import", Json.Text "")];
+  case Config.load { defaults = defaults, file = Option.None, envPrefix = "INV_", args = Program.args Unit } of
+      Err why -> Program.fail 2 "inventory: {why}"
+    | Ok v ->
+        store = setting Decode.string "store" v;
+        member = setting Decode.string "member" v;
+        from = setting Decode.string "import" v;
+        if strlen member > 0 then addMemberCli store member (setting Decode.string "password" v)
+        else if strlen from > 0 then importFirestore from store
+        else serveApp store v.
