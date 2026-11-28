@@ -81,7 +81,9 @@ MutMap = use "std/mutmap".
 # (G.sendWith): `Login` its name and password, `AddMember` theirs.
 Msg = Type (Login String String | Logout | ClientState Client | New | Edit Int | Save | Cancel | Delete Int
           | AddTag String | AddMember String String | Password String | ForgetDevices | Theme | Dismiss | Clear Int Int | Page Int
-          | Command String).
+          | Command String
+          # the driver's replies (sid 0 only): an event's own time, the journal's write
+          | Timed String Int | Wrote Int | WriteFailed String).
 codec = @Msg.
 
 # What the page holds.  The search, the sort and the editor's drafts are
@@ -320,16 +322,21 @@ replayPut m tbl order renamed it =
       (Option.None, t1) -> (m2, MutMap.insert it.id it t1, it.id :: order)
     | (Option.Some old, t1) -> (m2, MutMap.insert it.id (merged renamed old it) t1, order).
 
-# The pending lines, oldest first, in ONE write.  A write that fails, or a
-# file that is no longer the one the journal left (a backup restored over it,
-# a member added from the command line while the server runs), stops the
-# server: the page must never show a change the disk does not have; launchd
-# starts it again, and the model is folded from what the file holds now.
+# The pending lines, oldest first, in ONE write: a command (Live.Append) that
+# std/live performs in event order, before any tab sees the change.  A write
+# that fails, or a file that is no longer the one the journal left (a backup
+# restored over it, a member added from the command line while the server
+# runs), withholds the broadcast and comes back as WriteFailed, which stops
+# the PROCESS: the page must never show a change the disk does not have;
+# launchd starts it again, and the model is folded from what the file holds
+# now.  (An actor's `error` is contained: it would leave a server that answers
+# the page and never commits again.)
 flush j m = case m.pend of
-    Nil -> m
-  | ls -> case Journal.append (List.reverse ls) j of
-      Ok _ -> { m | pend = Nil }
-    | Err why -> error "inventory: {why}".
+    Nil -> (m, Nil)
+  | ls -> ({ m | pend = Nil }, [Live.Append j (List.reverse ls) wrote]).
+wrote r = case r of
+    Ok us -> Wrote us
+  | Err why -> WriteFailed why.
 
 # ---- sessions ----------------------------------------------------------------------------
 
@@ -352,16 +359,19 @@ draftLocals d = [G.assign @Client.name d.name, G.assign @Client.loc d.loc, G.ass
 
 # ---- update ------------------------------------------------------------------------------
 
-# every event is timed: the app's own work, and the disk append when it wrote
+# `update` is pure: the disk append and the clock are commands.  Every event
+# is timed (Live.Took: the app's own work, measured by the driver) and its
+# pending lines are appended (Live.Append); both answers come back in the same
+# turn as driver messages, before any tab is told.
+update j (Live.Msg 0 (Timed kind us)) m = ({ m | prof = noteUpd kind us m.prof }, Nil).
+update j (Live.Msg 0 (Wrote us)) m =
+  p = m.prof;
+  ({ m | prof = { p | flush = note p.flush us } }, Nil).
+update j (Live.Msg 0 (WriteFailed why)) m = Program.fail 1 "inventory: {why}".
 update j ev m =
-  t0 = Sys.timeUs Unit;
   (m2, cs) = step ev m;
-  t1 = Sys.timeUs Unit;
-  wrote = not (List.isEmpty m2.pend);
-  m3 = flush j m2;
-  t2 = Sys.timeUs Unit;
-  prof = noteUpd (kindOf ev) (t1 - t0) m3.prof;
-  ({ m3 | prof = if wrote then { prof | flush = note prof.flush (t2 - t1) } else prof }, cs).
+  (m3, writes) = flush j m2;
+  (m3, List.append cs (Live.Took (Timed (kindOf ev)) :: writes)).
 
 step (Live.Msg sid msg) m = pMsg sid msg m.
 step (Live.Left sid) m = (forget m sid, Nil).
@@ -427,6 +437,9 @@ msgKind Dismiss         = "dismiss".
 msgKind (Clear _ _)     = "toast".
 msgKind (Page _)        = "page".
 msgKind (Command _)     = "admin".
+msgKind (Timed _ _)     = "timed".
+msgKind (Wrote _)       = "wrote".
+msgKind (WriteFailed _) = "failed".
 
 statLine label st = "{S.padRight 9 " " label} n {S.padLeft 6 " " "{st.n}"}  avg {S.padLeft 7 " " "{avg st}"} us  max {S.padLeft 7 " " "{st.max}"} us  last {st.last} us".
 
