@@ -333,10 +333,10 @@ flush j m = case m.pend of
 
 # ---- sessions ----------------------------------------------------------------------------
 
-sGet ss sid = ss |> List.find (fn s -> s.sid == sid) |> Option.withDefault { noSess | sid = sid }.
-sPut m s = { m | sess = s :: sDel m.sess s.sid }.
-sDel ss sid = List.filter (fn s -> s.sid != sid) ss.
-forget m sid = { m | sess = sDel m.sess sid }.
+sGet ss sid = Live.sessionGet (fn s -> s.sid) (fn id -> { noSess | sid = id }) sid ss.
+sPut m s = { m | sess = Live.sessionPut (fn x -> x.sid) s m.sess }.
+sDel ss sid = Live.sessionDrop (fn s -> s.sid) sid ss.
+forget m sid = { m | sess = Live.sessionDrop (fn s -> s.sid) sid m.sess }.
 
 # a toast: text with a role (ok, warn); it clears itself after a while unless
 # a newer one replaced it
