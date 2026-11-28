@@ -2,7 +2,7 @@
 
 C = use "sol/lib/project".
 W = use "../scripts/webtest".
-J = use "sol/lib/json".
+J = use "std/jsondoc".
 
 runChecks u =
   _ = C.setup Unit;
@@ -25,4 +25,4 @@ runChecks u =
       ("checks",J.JArr [J.JStr "native application behavior",J.JStr "real loopback HTTP 200",J.JStr "application title",J.JStr "owned server cleanup"]),
       ("compiler",J.JStr (Str.trim (C.command ["fpr","--version"]))) ]).
 
-> runChecks Unit.
+>! runChecks Unit.

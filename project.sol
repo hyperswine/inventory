@@ -12,7 +12,7 @@ start arguments =
   _ = build Unit;
   C.live (["./build/inventory"] + arguments).
 
-> case args Unit of
+>! case args Unit of
     ["build"] -> build Unit
   | "run" :: arguments -> _ = start arguments; Unit
   | ["test"] -> _ = build Unit; print (C.command ["sol","tests/check.sol"])
